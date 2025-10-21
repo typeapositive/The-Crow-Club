@@ -5,11 +5,11 @@ import asyncio
 import random
 from blackjack_game import BlackjackGame, Card
 
-# Configurações do Bot
+# configurações do Bot
 TOKEN: Final = '7760039811:AAE-JNN14Gd5ZodjP9xpDakRyde1qKBuD5k'
 BOT_USERNAME: Final = '@TheCrowClub_bot'
 
-# Estrutura para armazenar jogos ativos e seus jogadores
+# estrutura para armazenar jogos ativos e seus jogadores
 class GameSession:
     def __init__(self, host_id):
         self.game = BlackjackGame()
@@ -23,13 +23,13 @@ class GameSession:
         self.votes_continue = set()
         self.votes_end = set()
         self.scores = {}  # user_id: pontos totais
-        self.round_winners = []  # Lista de vencedores da rodada atual
+        self.round_winners = []  # lista de vencedores da rodada atual
 
 active_sessions = {}  # chat_id: GameSession
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "Bem-vindo ao Crow Club. 🎭\n\n"
+        "Bem-vindo ao Crow Club.\n\n"
         "Aqui, os jogos têm um preço além das fichas...\n"
         "Comandos disponíveis:\n"
         "/create_blackjack - Cria uma nova mesa de Blackjack\n"
