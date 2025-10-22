@@ -334,25 +334,13 @@ async def hit_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(message_text)
         await check_round_end(chat_id, session, context)
     elif total > 21:
-        # Selecionar carta para maldição
-        available_cards = [card for card in player["hand"] 
-                         if not any(curse.value == card.value and curse.suit == card.suit 
-                                  for curse in player["curses"])]
-        
+        # Selecionar carta para maldição de forma verdadeiramente aleatória
         if any(card.value == "Joker" for card in player["hand"]):
-            # Para Joker, selecionar maldição aleatória que não foi usada antes
+            # Para Joker, selecionar maldição aleatória de qualquer carta do deck
             all_curses = session.game._create_deck()
-            available_curses = [card for card in all_curses 
-                              if not any(curse.curse == card.curse 
-                                       for curse in player["curses"])]
-            if available_curses:
-                curse_card = random.choice(available_curses)
-            else:
-                curse_card = random.choice(all_curses)
-        elif available_cards:
-            curse_card = random.choice(available_cards)
+            curse_card = random.choice(all_curses)
         else:
-            # Se todas as cartas já foram usadas para maldições, escolha uma aleatória
+            # Para cartas normais, selecionar aleatoriamente da mão do jogador
             curse_card = random.choice(player["hand"])
         
         player["curses"].append(curse_card)
