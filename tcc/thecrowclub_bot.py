@@ -37,7 +37,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/start_game - Inicia o jogo (apenas para o criador)\n"
         "/hit - Pede mais uma carta\n"
         "/stand - Mantém suas cartas\n"
-        "/leave - Tenta sair da mesa (se as cartas permitirem...)\n"
+        "/leave - Sair da mesa.\n"
         "/kill - Encerra a partida (apenas para o criador)\n"
         "/rules - Regras do Blackjack\n"
         "/continue - Vota para continuar após 5 rodadas\n"
