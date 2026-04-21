@@ -140,7 +140,7 @@ class BlackjackGame:
         return self.get_dealer_score()
 
     def get_score(self) -> int:
-        """Calcula a pontuação do jogador"""
+        """Calcula a pontuacao do jogador."""
         score = 0
         aces = 0
 
@@ -149,20 +149,20 @@ class BlackjackGame:
                 score += 10
             elif card.value == 'A':
                 aces += 1
-            elif card.value != 'Joker':
+                score += 11
+            elif card.value == 'Joker':
+                score += 0
+            else:
                 score += int(card.value)
 
-        # Adiciona os Áses
-        for _ in range(aces):
-            if score + 11 <= 21:
-                score += 11
-            else:
-                score += 1
+        while score > 21 and aces > 0:
+            score -= 10
+            aces -= 1
 
         return score
 
     def get_dealer_score(self) -> int:
-        """Calcula a pontuação do dealer"""
+        """Calcula a pontuacao do dealer."""
         score = 0
         aces = 0
 
@@ -171,16 +171,18 @@ class BlackjackGame:
                 score += 10
             elif card.value == 'A':
                 aces += 1
-            elif card.value != 'Joker':
+                score += 11
+            elif card.value == 'Joker':
+                score += 0
+            else:
                 score += int(card.value)
 
-        for _ in range(aces):
-            if score + 11 <= 21:
-                score += 11
-            else:
-                score += 1
+        while score > 21 and aces > 0:
+            score -= 10
+            aces -= 1
 
         return score
+
 
     def is_bust(self) -> bool:
         """Verifica se o jogador estourou"""

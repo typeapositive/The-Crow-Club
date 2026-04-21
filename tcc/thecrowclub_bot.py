@@ -5,7 +5,36 @@ import asyncio
 import random
 from blackjack_game import BlackjackGame, Card
 
-# configurações do Bot
+def calculate_blackjack_score(hand):
+    """Calcula a pontuacao da mao com a regra classica do Blackjack."""
+    score = 0
+    aces = 0
+    
+    for card in hand:
+        if card.value in ['J', 'Q', 'K']:
+            score += 10
+        elif card.value == 'A':
+            aces += 1
+            score += 11
+        elif card.value == 'Joker':
+            score += 0
+        else:
+            score += int(card.value)
+
+    while score > 21 and aces > 0:
+        score -= 10
+        aces -= 1
+    
+    return score
+
+def find_user_session(user_id):
+    """Find the active session for a user across all chats"""
+    for chat_id, session in active_sessions.items():
+        if user_id in session.players:
+            return chat_id, session
+    return None, None
+
+# configurações do bot
 TOKEN: Final = '7760039811:AAE-JNN14Gd5ZodjP9xpDakRyde1qKBuD5k'
 BOT_USERNAME: Final = '@TheCrowClub_bot'
 
@@ -24,6 +53,8 @@ class GameSession:
         self.votes_end = set()
         self.scores = {}  # user_id: pontos totais
         self.round_winners = []  # lista de vencedores da rodada atual
+        self.player_order = []  # ordem dos jogadores para jogar
+        self.current_player_index = 0  # índice do jogador atual
 
 active_sessions = {}  # chat_id: GameSession
 
@@ -141,11 +172,16 @@ async def start_game_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
         return
         
     session.started = True
-    
-    # Apresentação dos jogadores e dealer
-    players_text = "\n".join([f"• {(await context.bot.get_chat_member(chat_id, player_id)).user.first_name}" 
-                             for player_id in session.players.keys()])
-    
+
+    # apresentação dos jogadores e dealer
+    players_list = []
+
+    for player_id in session.players.keys():
+        member = await context.bot.get_chat_member(chat_id, player_id)
+        players_list.append(f"• {member.user.first_name}")
+
+    players_text = "\n".join(players_list)
+
     await update.message.reply_text(
         "🎭 Bem-vindos ao Crow Club! 🎭\n\n"
         "Seu dealer hoje será Kaz Brekker, o proprietário do Clube do Corvo.\n"
@@ -154,20 +190,16 @@ async def start_game_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
         f"🎲 Iniciando rodada {session.current_round} de {session.max_rounds}!\n"
         "Pegue suas cartas iniciais: /hit@TheCrowClub_bot"
     )
-
 async def check_round_end(chat_id, session, context):
     if all(player["stand"] for player in session.players.values()):
-        # Resetar lista de vencedores da rodada
         session.round_winners = []
         max_valid_total = 0
-        
-        # Primeiro verifica quem fez 21 pontos
+
         for player_id, data in session.players.items():
             if data["total"] == 21:
                 session.round_winners.append(player_id)
-                session.scores[player_id] = session.scores.get(player_id, 0) + 2  # Bônus por fazer 21
-        
-        # Se ninguém fez 21, encontra o maior valor válido
+                session.scores[player_id] = session.scores.get(player_id, 0) + 2
+
         if not session.round_winners:
             for player_id, data in session.players.items():
                 if data["total"] <= 21:
@@ -176,47 +208,60 @@ async def check_round_end(chat_id, session, context):
                         session.round_winners = [player_id]
                     elif data["total"] == max_valid_total:
                         session.round_winners.append(player_id)
-            
-            # Adicionar pontos aos vencedores
+
             for winner_id in session.round_winners:
                 session.scores[winner_id] = session.scores.get(winner_id, 0) + 1
-        
-        # Mensagem de fim de rodada
+
+        round_summary = f"Resultados da rodada {session.current_round}:\n"
+        for player_id, data in session.players.items():
+            user = await context.bot.get_chat_member(chat_id, player_id)
+            cards_text = ", ".join([f"{card.value} de {card.suit}" for card in data["hand"]])
+
+            if data["total"] > 21:
+                status = "Estourou"
+            elif player_id in session.round_winners:
+                status = "Venceu"
+            else:
+                status = "Perdeu"
+
+            round_summary += f"\n- {user.user.first_name}: {cards_text} (Total: {data['total']}) - {status}"
+
+        await context.bot.send_message(chat_id, round_summary)
+
         if session.round_winners:
             winners_text = ""
             for winner_id in session.round_winners:
                 user = await context.bot.get_chat_member(chat_id, winner_id)
                 points = session.players[winner_id]["total"]
-                winners_text += f"\n• {user.user.first_name} com {points} pontos!"
-            
+                winners_text += f"\n- {user.user.first_name} com {points} pontos!"
+
             await context.bot.send_message(
                 chat_id,
-                f"🏆 Fim da rodada {session.current_round}!\n"
+                f"Fim da rodada {session.current_round}!\n"
                 f"Vencedor(es):{winners_text}\n"
                 "Pontuação atual:"
-                + "\n".join([f"\n• {(await context.bot.get_chat_member(chat_id, pid)).user.first_name}: {score} pontos" 
+                + "\n".join([f"\n- {(await context.bot.get_chat_member(chat_id, pid)).user.first_name}: {score} pontos"
                             for pid, score in session.scores.items()])
             )
         else:
             await context.bot.send_message(
                 chat_id,
-                f"🏆 Fim da rodada {session.current_round}!\n"
+                f"Fim da rodada {session.current_round}!\n"
                 "Nenhum vencedor nesta rodada - todos ultrapassaram 21!"
             )
-        
+
         session.current_round += 1
-        
+
         if session.current_round > session.max_rounds:
-            # Verificar se houve empate nas 5 rodadas iniciais
             if session.max_rounds == 5:
                 max_score = max(session.scores.values())
                 winners = [pid for pid, score in session.scores.items() if score == max_score]
-                
+
                 if len(winners) > 1:
                     session.max_rounds = 10
                     await context.bot.send_message(
                         chat_id,
-                        "🎲 Temos um empate! O jogo continuará automaticamente até 10 rodadas para desempate!"
+                        "Temos um empate! O jogo continuará automaticamente até 10 rodadas para desempate!"
                     )
                     await start_new_round(chat_id, session, context)
                     return
@@ -226,23 +271,22 @@ async def check_round_end(chat_id, session, context):
                         "Fim das 5 rodadas iniciais!\nUse /continue para votar em mais 5 rodadas\nOu /end para encerrar o jogo"
                     )
             else:
-                # Encontrar vencedor final
                 max_score = max(session.scores.values())
                 final_winners = [pid for pid, score in session.scores.items() if score == max_score]
-                
+
                 if len(final_winners) == 1:
                     final_winner_id = final_winners[0]
                     losers = [player_id for player_id in session.players.keys() if player_id != final_winner_id]
-                    
+
                     winner = await context.bot.get_chat_member(chat_id, final_winner_id)
                     winner_name = winner.user.first_name
-                    
+
                     winners_msg = (
-                        f"🎉 Fim do jogo!\n"
+                        f"Fim do jogo!\n"
                         f"Grande vencedor: {winner_name} com {max_score} pontos!\n"
-                        f"As maldições foram neutralizadas para o vencedor!"
+                        "As maldições foram neutralizadas para o vencedor!"
                     )
-                    
+
                     losers_msg = "\n\nPerdedores e suas maldições:"
                     for loser_id in losers:
                         user = await context.bot.get_chat_member(chat_id, loser_id)
@@ -253,18 +297,17 @@ async def check_round_end(chat_id, session, context):
                             losers_msg += f"\n\n{user.user.first_name} sofrerá por {curse_hours} horas:\n{curses_text}"
                         else:
                             losers_msg += f"\n\n{user.user.first_name} escapou sem maldições!"
-                    
+
                     await context.bot.send_message(chat_id, winners_msg + losers_msg)
                     del active_sessions[chat_id]
                 else:
-                    # Se ainda houver empate após 10 rodadas
                     winners_names = [
-                        (await context.bot.get_chat_member(chat_id, winner_id)).user.first_name 
+                        (await context.bot.get_chat_member(chat_id, winner_id)).user.first_name
                         for winner_id in final_winners
                     ]
                     await context.bot.send_message(
                         chat_id,
-                        f"🎉 Fim do jogo!\nHouve um empate entre: {', '.join(winners_names)}\n"
+                        f"Fim do jogo!\nHouve um empate entre: {', '.join(winners_names)}\n"
                         f"Cada um com {max_score} pontos!\nTodos os empatados terão suas maldições neutralizadas!"
                     )
                     del active_sessions[chat_id]
@@ -272,31 +315,29 @@ async def check_round_end(chat_id, session, context):
             await start_new_round(chat_id, session, context)
 
 async def start_new_round(chat_id, session, context):
-    session.game = BlackjackGame()  # Reset do deck
-    
-    # Resetar dados dos jogadores para nova rodada
+    session.game = BlackjackGame()
+
     for player_id in list(session.players.keys()):
         session.players[player_id]["hand"] = []
         session.players[player_id]["total"] = 0
         session.players[player_id]["stand"] = False
         session.players[player_id]["message_id"] = None
-    
+
     await context.bot.send_message(
-        chat_id, 
-        f"🎲 Iniciando rodada {session.current_round} de {session.max_rounds}!\n"
-        f"Pegue suas cartas iniciais: /hit@TheCrowClub_bot"
+        chat_id,
+        f"Iniciando rodada {session.current_round} de {session.max_rounds}!\n"
+        "Pegue suas cartas iniciais: /hit@TheCrowClub_bot"
     )
 
 async def hit_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = update.message.chat_id
     user_id = update.message.from_user.id
-    
-    if chat_id not in active_sessions:
-        await update.message.reply_text("Não há jogo ativo neste chat.")
+
+    chat_id, session = find_user_session(user_id)
+
+    if session is None:
+        await update.message.reply_text("Você não está participando de nenhum jogo ativo.")
         return
-        
-    session = active_sessions[chat_id]
-    
+
     if user_id not in session.players:
         await update.message.reply_text("Você não está participando deste jogo.")
         return
@@ -306,102 +347,93 @@ async def hit_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     player = session.players[user_id]
-    
-    # Se é a primeira vez pegando cartas nesta rodada
+    user = update.message.from_user
+
     if not player["hand"]:
         player["hand"] = [session.game._draw_card(), session.game._draw_card()]
     else:
         player["hand"].append(session.game._draw_card())
-    
-    # Calcular total
-    total = 0
-    for card in player["hand"]:
-        if card.value in ['J','Q','K']:
-            total += 10
-        elif card.value == 'A':
-            total += 11
-        elif card.value != 'Joker':  # Ignora Joker no cálculo do total
-            total += int(card.value)
-    
+
+    total = calculate_blackjack_score(player["hand"])
     player["total"] = total
     cards_text = "\n".join([f"{card.value} de {card.suit}" for card in player["hand"]])
-    
-    message_text = f"🃏 Suas cartas:\n{cards_text}\nTotal: {total}\n\n"
-    
+
+    private_message = f"Suas cartas:\n{cards_text}\nTotal: {total}\n\n"
+
     if total == 21:
-        message_text += "🎯 Blackjack! 21 pontos!"
+        private_message += "Blackjack! 21 pontos!"
         player["stand"] = True
-        await update.message.reply_text(message_text)
+        await context.bot.send_message(user_id, private_message)
+        await context.bot.send_message(chat_id, f"{user.first_name} finalizou a rodada.")
         await check_round_end(chat_id, session, context)
     elif total > 21:
-        # Selecionar carta para maldição de forma verdadeiramente aleatória
         if any(card.value == "Joker" for card in player["hand"]):
-            # Para Joker, selecionar maldição aleatória de qualquer carta do deck
             all_curses = session.game._create_deck()
             curse_card = random.choice(all_curses)
         else:
-            # Para cartas normais, selecionar aleatoriamente da mão do jogador
             curse_card = random.choice(player["hand"])
-        
+
         player["curses"].append(curse_card)
-        num_cards = len(player["hand"])
-        
-        message_text = (
-            f"☠️ Você ultrapassou 21 com {num_cards} cartas!\n"
+
+        private_message = (
+            f"Você ultrapassou 21 com {total} pontos!\n"
             f"A maldição recai sobre você através da carta:\n"
             f"{curse_card.value} de {curse_card.suit}\n"
             f"Sua punição será:\n"
             f"{curse_card.curse}"
         )
-        
-        await update.message.reply_text(message_text)
+        await context.bot.send_message(user_id, private_message)
         player["stand"] = True
+        await context.bot.send_message(chat_id, f"{user.first_name} finalizou a rodada.")
         await check_round_end(chat_id, session, context)
     else:
-        message_text += "Use /hit para mais uma carta ou /stand para manter"
-        await update.message.reply_text(message_text)
+        private_message += "Use /hit para mais uma carta ou /stand para manter"
+        await context.bot.send_message(user_id, private_message)
+        await context.bot.send_message(chat_id, f"{user.first_name} pediu uma carta!")
 
 async def stand_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = update.message.chat_id
     user_id = update.message.from_user.id
-    
-    if chat_id not in active_sessions:
-        await update.message.reply_text("Não há jogo ativo neste chat.")
+
+    chat_id, session = find_user_session(user_id)
+
+    if session is None:
+        await update.message.reply_text("Você não está participando de nenhum jogo ativo.")
         return
-        
-    session = active_sessions[chat_id]
-    
+
     if user_id not in session.players:
         await update.message.reply_text("Você não está participando deste jogo.")
         return
-        
+
     if session.players[user_id]["stand"]:
         await update.message.reply_text("Você já deu stand nesta rodada.")
         return
 
     player = session.players[user_id]
-    
+    user = update.message.from_user
+
     if not player["hand"]:
         await update.message.reply_text("Você precisa pegar suas cartas iniciais primeiro com /hit")
         return
-        
+
     player["stand"] = True
     total = player["total"]
-    
+
     cards_text = "\n".join([f"{card.value} de {card.suit}" for card in player["hand"]])
-    await update.message.reply_text(f"🃏 Suas cartas:\n{cards_text}\nTotal: {total}\n\nVocê manteve suas cartas!")
-    
+    private_message = f"Suas cartas:\n{cards_text}\nTotal: {total}\n\nVocê manteve suas cartas!"
+    await context.bot.send_message(user_id, private_message)
+    await context.bot.send_message(chat_id, f"{user.first_name} finalizou a rodada.")
+
     await check_round_end(chat_id, session, context)
 
 async def continue_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = update.message.chat_id
     user_id = update.message.from_user.id
     
-    if chat_id not in active_sessions:
-        await update.message.reply_text("Não há jogo ativo neste chat.")
+    # Find the user's active session
+    chat_id, session = find_user_session(user_id)
+    
+    if session is None:
+        await update.message.reply_text("Você não está participando de nenhum jogo ativo.")
         return
-        
-    session = active_sessions[chat_id]
     
     if session.current_round <= 5 or session.max_rounds > 5:
         await update.message.reply_text("Este comando só pode ser usado após as 5 rodadas iniciais.")
@@ -436,14 +468,14 @@ async def continue_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"Voto registrado! Faltam {remaining} jogador(es) votarem.")
 
 async def end_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = update.message.chat_id
     user_id = update.message.from_user.id
     
-    if chat_id not in active_sessions:
-        await update.message.reply_text("Não há jogo ativo neste chat.")
+    # Find the user's active session
+    chat_id, session = find_user_session(user_id)
+    
+    if session is None:
+        await update.message.reply_text("Você não está participando de nenhum jogo ativo.")
         return
-        
-    session = active_sessions[chat_id]
     
     if session.current_round <= 5:
         await update.message.reply_text("Este comando só pode ser usado após as 5 rodadas iniciais.")
@@ -545,12 +577,13 @@ async def rules_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "3. O objetivo é chegar o mais próximo de 21 sem ultrapassar\n"
         "4. Cartas numéricas valem seu número\n"
         "5. J, Q e K valem 10\n"
-        "6. Ás vale 11\n"
-        "7. Se ultrapassar 21, você será amaldiçoado por uma carta aleatória da sua mão\n"
-        "8. Se você tiver um Coringa e perder, a maldição será aleatória\n"
-        "9. São 5 rodadas iniciais, podendo chegar a 10 se todos concordarem\n"
-        "10. Fazer exatamente 21 pontos vale 2 pontos na rodada\n"
-        "11. Vencer uma rodada normalmente vale 1 ponto\n"
+        "6. Ás vale 1 ou 11, no valor que for melhor para a mão\n"
+        "7. Joker vale 0\n"
+        "8. Se ultrapassar 21, você será amaldiçoado por uma carta aleatória da sua mão\n"
+        "9. Se você tiver um Coringa e perder, a maldição será aleatória\n"
+        "10. São 5 rodadas iniciais, podendo chegar a 10 se todos concordarem\n"
+        "11. Fazer exatamente 21 pontos vale 2 pontos na rodada\n"
+        "12. Vencer uma rodada normalmente vale 1 ponto\n"
         "⚠️ Jogue por sua conta e risco..."
     )
 
@@ -576,3 +609,4 @@ def main():
 
 if __name__ == '__main__':
     main()
+
