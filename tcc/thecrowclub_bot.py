@@ -34,6 +34,38 @@ def find_user_session(user_id):
             return chat_id, session
     return None, None
 
+def create_player_state():
+    return {
+        "hand": [],
+        "total": 0,
+        "stand": False,
+        "message_id": None,
+        "curses": [],
+        "blinded": False,
+        "last_round_curse": None,
+    }
+
+def apply_curse_to_player(player, curse_card):
+    player["curses"].append(curse_card)
+    player["last_round_curse"] = curse_card
+
+    if curse_card.value == "7" and curse_card.suit == "Paus":
+        player["blinded"] = True
+
+def auto_resolve_blinded_player(player, game):
+    num_cards = random.randint(2, 5)
+    player["hand"] = [game._draw_card() for _ in range(num_cards)]
+    player["total"] = calculate_blackjack_score(player["hand"])
+    player["stand"] = True
+    player["last_round_curse"] = None
+
+    if player["total"] > 21:
+        if any(card.value == "Joker" for card in player["hand"]):
+            curse_card = random.choice(game._create_deck())
+        else:
+            curse_card = random.choice(player["hand"])
+        apply_curse_to_player(player, curse_card)
+
 # configurações do bot
 TOKEN: Final = '7760039811:AAE-JNN14Gd5ZodjP9xpDakRyde1qKBuD5k'
 BOT_USERNAME: Final = '@TheCrowClub_bot'
@@ -112,7 +144,7 @@ async def create_blackjack_command(update: Update, context: ContextTypes.DEFAULT
         return
         
     session = GameSession(user_id)
-    session.players[user_id] = {"hand": [], "total": 0, "stand": False, "message_id": None, "curses": []}
+    session.players[user_id] = create_player_state()
     session.scores[user_id] = 0
     active_sessions[chat_id] = session
     
@@ -145,7 +177,7 @@ async def join_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Você já está na mesa.")
         return
         
-    session.players[user_id] = {"hand": [], "total": 0, "stand": False, "message_id": None, "curses": []}
+    session.players[user_id] = create_player_state()
     session.scores[user_id] = 0
     await update.message.reply_text(f"Jogador {update.message.from_user.first_name} entrou na mesa!")
 
@@ -225,6 +257,13 @@ async def check_round_end(chat_id, session, context):
                 status = "Perdeu"
 
             round_summary += f"\n- {user.user.first_name}: {cards_text} (Total: {data['total']}) - {status}"
+
+            if data["last_round_curse"] is not None:
+                curse_card = data["last_round_curse"]
+                round_summary += (
+                    f"\n  Maldição: {curse_card.value} de {curse_card.suit}"
+                    f"\n  Efeito: {curse_card.curse}"
+                )
 
         await context.bot.send_message(chat_id, round_summary)
 
@@ -322,12 +361,20 @@ async def start_new_round(chat_id, session, context):
         session.players[player_id]["total"] = 0
         session.players[player_id]["stand"] = False
         session.players[player_id]["message_id"] = None
+        session.players[player_id]["last_round_curse"] = None
 
     await context.bot.send_message(
         chat_id,
         f"Iniciando rodada {session.current_round} de {session.max_rounds}!\n"
         "Pegue suas cartas iniciais: /hit@TheCrowClub_bot"
     )
+
+    for player_id, player in session.players.items():
+        if player["blinded"]:
+            auto_resolve_blinded_player(player, session.game)
+
+    if all(player["stand"] for player in session.players.values()):
+        await check_round_end(chat_id, session, context)
 
 async def hit_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
@@ -340,6 +387,10 @@ async def hit_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if user_id not in session.players:
         await update.message.reply_text("Você não está participando deste jogo.")
+        return
+
+    if session.players[user_id]["blinded"]:
+        await update.message.reply_text("Você está cego pelo 7 de Paus e terá sua rodada resolvida automaticamente até o fim da partida.")
         return
 
     if session.players[user_id]["stand"]:
@@ -373,7 +424,7 @@ async def hit_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             curse_card = random.choice(player["hand"])
 
-        player["curses"].append(curse_card)
+        apply_curse_to_player(player, curse_card)
 
         private_message = (
             f"Você ultrapassou 21 com {total} pontos!\n"
@@ -402,6 +453,10 @@ async def stand_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if user_id not in session.players:
         await update.message.reply_text("Você não está participando deste jogo.")
+        return
+
+    if session.players[user_id]["blinded"]:
+        await update.message.reply_text("Você está cego pelo 7 de Paus e terá sua rodada resolvida automaticamente até o fim da partida.")
         return
 
     if session.players[user_id]["stand"]:
