@@ -20,10 +20,12 @@ Os jogadores entram na mesa, compram cartas e tentam chegar o mais perto possív
 
 A graça está justamente nisso. O bot cuida da estrutura da partida, mas o grupo pode usar os resultados para transformar cada rodada em uma experiência mais interpretativa, engraçada, caótica ou sombria, dependendo da carta que receber.
 
-## Tecnologias
+## Tecnologias utilizadas
 
 - Python
 - `python-telegram-bot`
+- Telegram Bot API
+- lógica de jogo baseada em regras
 
 ## Objetivo do projeto
 
