@@ -1,6 +1,7 @@
 from typing import Final
 from telegram import Update
-from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
+from telegram.error import NetworkError, RetryAfter, TimedOut
+from telegram.ext import Application, ChatMemberHandler, CommandHandler, MessageHandler, filters, ContextTypes
 import asyncio
 import json
 import random
@@ -8,33 +9,117 @@ from pathlib import Path
 from blackjack_game import BlackjackGame, Card
 
 INITIAL_COINS = 10
+INITIAL_DEALER_COINS = 1000
 BLACKJACK_LOSS_COINS = 3
+MIN_LOAN_COINS = 3
+MAX_LOAN_COINS = 12
 BALANCES_FILE = Path(__file__).with_name("player_balances.json")
 
 player_balances = {}
+dealer_balances = {}
+player_debts = {}
 
-def load_player_balances():
+def load_economy():
     if not BALANCES_FILE.exists():
-        return {}
+        return {}, {}, {}
 
     try:
         with BALANCES_FILE.open("r", encoding="utf-8") as file:
             data = json.load(file)
     except (json.JSONDecodeError, OSError):
-        return {}
+        return {}, {}, {}
 
-    return {str(user_id): int(coins) for user_id, coins in data.items()}
+    if "players" in data or "dealers" in data or "debts" in data:
+        players = data.get("players", {})
+        dealers = data.get("dealers", {})
+        debts = data.get("debts", {})
+        return (
+            {str(user_id): int(coins) for user_id, coins in players.items()},
+            {str(chat_id): int(coins) for chat_id, coins in dealers.items()},
+            {str(user_id): int(coins) for user_id, coins in debts.items()},
+        )
 
-def save_player_balances():
+    return {str(user_id): int(coins) for user_id, coins in data.items()}, {}, {}
+
+def save_economy():
     with BALANCES_FILE.open("w", encoding="utf-8") as file:
-        json.dump(player_balances, file, ensure_ascii=False, indent=2)
+        json.dump(
+            {
+                "players": player_balances,
+                "dealers": dealer_balances,
+                "debts": player_debts,
+            },
+            file,
+            ensure_ascii=False,
+            indent=2,
+        )
 
 def get_player_balance(user_id):
     key = str(user_id)
     if key not in player_balances:
         player_balances[key] = INITIAL_COINS
-        save_player_balances()
+        save_economy()
     return player_balances[key]
+
+def get_dealer_balance(chat_id):
+    key = str(chat_id)
+    if key not in dealer_balances:
+        dealer_balances[key] = INITIAL_DEALER_COINS
+        save_economy()
+    return dealer_balances[key]
+
+def get_player_debt(user_id):
+    return player_debts.get(str(user_id), 0)
+
+def change_player_balance(user_id, amount):
+    key = str(user_id)
+    player_balances[key] = max(0, get_player_balance(user_id) + amount)
+    save_economy()
+    return player_balances[key]
+
+def change_dealer_balance(chat_id, amount):
+    key = str(chat_id)
+    dealer_balances[key] = max(0, get_dealer_balance(chat_id) + amount)
+    save_economy()
+    return dealer_balances[key]
+
+def lend_from_dealer(chat_id, user_id, amount):
+    dealer_key = str(chat_id)
+    user_key = str(user_id)
+    get_dealer_balance(chat_id)
+    get_player_balance(user_id)
+
+    if dealer_balances[dealer_key] < amount:
+        return 0
+
+    loan = amount
+    dealer_balances[dealer_key] -= loan
+    player_balances[user_key] += loan
+    player_debts[user_key] = get_player_debt(user_id) + loan
+    save_economy()
+    return loan
+
+def pay_debt_to_dealer(chat_id, user_id, amount):
+    dealer_key = str(chat_id)
+    user_key = str(user_id)
+    debt = get_player_debt(user_id)
+    balance = get_player_balance(user_id)
+    payment = min(amount, debt, balance)
+
+    if payment <= 0:
+        return 0
+
+    player_balances[user_key] = balance - payment
+    dealer_balances[dealer_key] = get_dealer_balance(chat_id) + payment
+    remaining_debt = debt - payment
+
+    if remaining_debt > 0:
+        player_debts[user_key] = remaining_debt
+    else:
+        player_debts.pop(user_key, None)
+
+    save_economy()
+    return payment
 
 def transfer_coins_to_winner(winner_id, loser_ids):
     winner_key = str(winner_id)
@@ -52,8 +137,53 @@ def transfer_coins_to_winner(winner_id, loser_ids):
         transfers[loser_id] = transferred
         total_received += transferred
 
-    save_player_balances()
+    save_economy()
     return transfers, total_received
+
+def transfer_player_to_dealer(chat_id, user_id, amount):
+    user_key = str(user_id)
+    dealer_key = str(chat_id)
+    available = get_player_balance(user_id)
+    transferred = min(amount, available)
+    player_balances[user_key] = available - transferred
+    dealer_balances[dealer_key] = get_dealer_balance(chat_id) + transferred
+    save_economy()
+    return transferred
+
+def transfer_player_to_player(from_user_id, to_user_id, amount):
+    from_key = str(from_user_id)
+    to_key = str(to_user_id)
+    available = get_player_balance(from_user_id)
+    transferred = min(amount, available)
+    player_balances[from_key] = available - transferred
+    player_balances[to_key] = get_player_balance(to_user_id) + transferred
+    save_economy()
+    return transferred
+
+def remove_player_coins(user_id, amount):
+    user_key = str(user_id)
+    available = get_player_balance(user_id)
+    removed = min(amount, available)
+    player_balances[user_key] = available - removed
+    save_economy()
+    return removed
+
+async def safe_send_message(context, chat_id, text):
+    for attempt in range(2):
+        try:
+            return await context.bot.send_message(chat_id, text)
+        except RetryAfter as error:
+            if attempt == 0:
+                await asyncio.sleep(error.retry_after + 1)
+                continue
+            print(f"Falha ao enviar mensagem para {chat_id}: flood control.")
+            return None
+        except (TimedOut, NetworkError):
+            if attempt == 0:
+                await asyncio.sleep(2)
+                continue
+            print(f"Falha ao enviar mensagem para {chat_id}: timeout/rede.")
+            return None
 
 def calculate_blackjack_score(hand):
     """Calcula a pontuacao da mao com a regra classica do Blackjack."""
@@ -116,6 +246,66 @@ def auto_resolve_blinded_player(player, game):
             curse_card = random.choice(player["hand"])
         apply_curse_to_player(player, curse_card)
 
+def is_player_broke_in_active_game(user_id):
+    chat_id, session = find_user_session(user_id)
+    return session is not None and session.started and get_player_balance(user_id) <= 0
+
+def get_loan_chat_id(message_chat_id, user_id):
+    active_chat_id, session = find_user_session(user_id)
+    if session is not None and session.started:
+        return active_chat_id
+    return message_chat_id
+
+async def apply_money_curse(chat_id, session, cursed_player_id, curse_card, context):
+    if curse_card.suit != "Ouros":
+        return None
+
+    cursed_user = await context.bot.get_chat_member(chat_id, cursed_player_id)
+    cursed_name = cursed_user.user.first_name
+    current_balance = get_player_balance(cursed_player_id)
+
+    if curse_card.value in ["2", "K"]:
+        amount = transfer_player_to_dealer(chat_id, cursed_player_id, current_balance)
+        return (
+            f"- {cursed_name} perdeu {amount} moeda(s) para Kaz Brekker "
+            f"por causa do {curse_card.value} de Ouros."
+        )
+
+    if curse_card.value == "3":
+        adversaries = [player_id for player_id in session.players.keys() if player_id != cursed_player_id]
+        if not adversaries:
+            amount = transfer_player_to_dealer(chat_id, cursed_player_id, current_balance)
+            return f"- {cursed_name} perdeu {amount} moeda(s) para Kaz Brekker."
+
+        recipient_id = adversaries[0] if len(adversaries) == 1 else random.choice(adversaries)
+        amount = transfer_player_to_player(cursed_player_id, recipient_id, current_balance)
+        recipient = await context.bot.get_chat_member(chat_id, recipient_id)
+        return (
+            f"- {cursed_name} perdeu {amount} moeda(s) para {recipient.user.first_name} "
+            "por causa do 3 de Ouros."
+        )
+
+    if curse_card.value == "4":
+        amount = remove_player_coins(cursed_player_id, current_balance)
+        return f"- {cursed_name} perdeu {amount} moeda(s): o ouro virou po por causa do 4 de Ouros."
+
+    if curse_card.value == "J":
+        amount = remove_player_coins(cursed_player_id, current_balance)
+        return (
+            f"- {cursed_name} perdeu {amount} moeda(s) para alguem fora da mesa "
+            "por causa do J de Ouros."
+        )
+
+    return None
+
+async def apply_final_money_curses(chat_id, session, cursed_player_id, context):
+    money_messages = []
+    for curse_card in session.players[cursed_player_id]["curses"]:
+        message = await apply_money_curse(chat_id, session, cursed_player_id, curse_card, context)
+        if message:
+            money_messages.append(message)
+    return money_messages
+
 # configurações do bot
 TOKEN: Final = '7760039811:AAE-JNN14Gd5ZodjP9xpDakRyde1qKBuD5k'
 BOT_USERNAME: Final = '@TheCrowClub_bot'
@@ -139,9 +329,10 @@ class GameSession:
         self.current_player_index = 0  # índice do jogador atual
 
 active_sessions = {}  # chat_id: GameSession
-player_balances = load_player_balances()
+player_balances, dealer_balances, player_debts = load_economy()
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    get_dealer_balance(update.message.chat_id)
     await update.message.reply_text(
         "Bem-vindo ao Crow Club.\n\n"
         "Aqui, os jogos têm um preço além das fichas...\n"
@@ -152,6 +343,8 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/hit - Pede mais uma carta\n"
         "/stand - Mantém suas cartas\n"
         "/saldo - Mostra quantas moedas voce tem\n"
+        "/pedir - Pede 3 a 12 moedas emprestadas ao Mãos Sujas\n"
+        "/pay - Paga sua divida com o Mãos Sujas\n"
         "/leave - Sair da mesa.\n"
         "/kill - Encerra a partida (apenas para o criador)\n"
         "/rules - Regras do Blackjack\n"
@@ -188,13 +381,144 @@ async def leave_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Você saiu da mesa. Sorte sua que o jogo ainda não havia começado...")
 
 async def balance_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.message.chat_id
     user_id = update.message.from_user.id
     balance = get_player_balance(user_id)
-    await update.message.reply_text(f"Voce tem {balance} moeda(s).")
+    debt = get_player_debt(user_id)
+    dealer_balance = get_dealer_balance(chat_id)
+    await update.message.reply_text(
+        f"Voce tem {balance} moeda(s).\n"
+        f"Divida com o Mãos Sujas: {debt} moeda(s).\n"
+        f"Kaz Brekker tem {dealer_balance} moeda(s)."
+    )
+
+async def bot_chat_member_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat = update.my_chat_member.chat
+    new_status = update.my_chat_member.new_chat_member.status
+
+    if chat.type in ["group", "supergroup"] and new_status in ["member", "administrator"]:
+        get_dealer_balance(chat.id)
+
+async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
+    if isinstance(context.error, RetryAfter):
+        print(f"Flood control do Telegram ignorado; tente novamente em {context.error.retry_after}s.")
+        return
+
+    if isinstance(context.error, (TimedOut, NetworkError)):
+        print("Erro de rede/timeout do Telegram ignorado; o bot continua rodando.")
+        return
+
+    raise context.error
+
+async def ask_loan_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.message.from_user.id
+    chat_id = get_loan_chat_id(update.message.chat_id, user_id)
+    get_dealer_balance(chat_id)
+    get_player_balance(user_id)
+
+    if context.args:
+        try:
+            amount = int(context.args[0])
+        except ValueError:
+            await update.message.reply_text("Diga um numero entre 3 e 12. Exemplo: /pedir 6")
+            return
+
+        if amount < MIN_LOAN_COINS or amount > MAX_LOAN_COINS:
+            await update.message.reply_text("Kaz so empresta valores entre 3 e 12 moedas.")
+            return
+
+        loan = lend_from_dealer(chat_id, user_id, amount)
+        if loan <= 0:
+            await update.message.reply_text("Kaz nao tem moedas suficientes neste grupo para emprestar agora.")
+            return
+
+        await update.message.reply_text(
+            f"Kaz Brekker emprestou {loan} moeda(s).\n"
+            f"Sua divida com o Mãos Sujas: {get_player_debt(user_id)} moeda(s)."
+        )
+        return
+
+    context.user_data["awaiting_loan_amount"] = True
+    await update.message.reply_text("Quanto voce vai pedir ao Mãos Sujas? Envie um valor de 3 a 12.")
+
+async def loan_amount_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.user_data.get("awaiting_loan_amount"):
+        return
+
+    context.user_data["awaiting_loan_amount"] = False
+    text = update.message.text.strip()
+    try:
+        amount = int(text)
+    except ValueError:
+        await update.message.reply_text("Kaz esperava um numero. Use /pedir de novo e escolha um valor de 3 a 12.")
+        return
+
+    if amount < MIN_LOAN_COINS or amount > MAX_LOAN_COINS:
+        await update.message.reply_text("Kaz so empresta valores entre 3 e 12 moedas. Use /pedir de novo.")
+        return
+
+    user_id = update.message.from_user.id
+    chat_id = get_loan_chat_id(update.message.chat_id, user_id)
+    loan = lend_from_dealer(chat_id, user_id, amount)
+    if loan <= 0:
+        await update.message.reply_text("Kaz nao tem moedas suficientes neste grupo para emprestar agora.")
+        return
+
+    await update.message.reply_text(
+        f"Kaz Brekker emprestou {loan} moeda(s).\n"
+        f"Sua divida com o Mãos Sujas: {get_player_debt(user_id)} moeda(s)."
+    )
+
+async def pay_debt_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.message.from_user.id
+    chat_id = get_loan_chat_id(update.message.chat_id, user_id)
+    debt = get_player_debt(user_id)
+    balance = get_player_balance(user_id)
+
+    if debt <= 0:
+        await update.message.reply_text("Voce nao deve nada ao Mãos Sujas.")
+        return
+
+    if balance <= 0:
+        await update.message.reply_text("Voce nao tem moedas para pagar Kaz agora.")
+        return
+
+    if context.args:
+        arg = context.args[0].lower()
+        if arg in ["all", "tudo", "todas"]:
+            amount = debt
+        else:
+            try:
+                amount = int(arg)
+            except ValueError:
+                await update.message.reply_text("Use /pay, /pay tudo ou /pay seguido de um numero.")
+                return
+
+            if amount <= 0:
+                await update.message.reply_text("O pagamento precisa ser maior que zero.")
+                return
+    else:
+        amount = debt
+
+    paid = pay_debt_to_dealer(chat_id, user_id, amount)
+    remaining_debt = get_player_debt(user_id)
+
+    await update.message.reply_text(
+        f"Voce pagou {paid} moeda(s) ao Mãos Sujas.\n"
+        f"Divida restante: {remaining_debt} moeda(s)."
+    )
 
 async def create_blackjack_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.message.chat_id
     user_id = update.message.from_user.id
+    get_dealer_balance(chat_id)
+
+    if get_player_balance(user_id) <= 0:
+        await update.message.reply_text(
+            "Voce esta sem moedas e nao pode criar uma mesa assim.\n"
+            "Antes de criar uma mesa, peça moedas com /pedir."
+        )
+        return
     
     if chat_id in active_sessions:
         await update.message.reply_text("Já existe uma mesa ativa neste chat.")
@@ -206,10 +530,8 @@ async def create_blackjack_command(update: Update, context: ContextTypes.DEFAULT
     get_player_balance(user_id)
     active_sessions[chat_id] = session
     
-    balance = get_player_balance(user_id)
     await update.message.reply_text(
         "🎲 Mesa de Blackjack criada!\n"
-        f"Seu saldo atual: {balance} moeda(s).\n"
         "Outros jogadores podem entrar usando /join@TheCrowClub_bot\n"
         "São necessários no mínimo 2 jogadores para começar.\n"
         "Quando todos estiverem prontos, use /start_game@TheCrowClub_bot"
@@ -218,6 +540,7 @@ async def create_blackjack_command(update: Update, context: ContextTypes.DEFAULT
 async def join_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.message.chat_id
     user_id = update.message.from_user.id
+    get_dealer_balance(chat_id)
     
     if chat_id not in active_sessions:
         await update.message.reply_text("Não há mesa ativa neste chat.")
@@ -236,11 +559,17 @@ async def join_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if user_id in session.players:
         await update.message.reply_text("Você já está na mesa.")
         return
+
+    if get_player_balance(user_id) <= 0:
+        await update.message.reply_text(
+            "Voce esta sem moedas e nao pode entrar na mesa assim.\n"
+            "Peça moedas com /pedir antes de entrar na mesa."
+        )
+        return
         
     session.players[user_id] = create_player_state()
     session.scores[user_id] = 0
-    balance = get_player_balance(user_id)
-    await update.message.reply_text(f"Jogador {update.message.from_user.first_name} entrou na mesa com {balance} moeda(s)!")
+    await update.message.reply_text(f"Jogador {update.message.from_user.first_name} entrou na mesa!")
 
 async def start_game_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.message.chat_id
@@ -262,6 +591,20 @@ async def start_game_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     if len(session.players) < session.min_players:
         await update.message.reply_text("São necessários no mínimo 2 jogadores para começar.")
+        return
+
+    broke_players = []
+    for player_id in session.players.keys():
+        if get_player_balance(player_id) <= 0:
+            member = await context.bot.get_chat_member(chat_id, player_id)
+            broke_players.append(member.user.first_name)
+
+    if broke_players:
+        await update.message.reply_text(
+            "A mesa nao pode começar enquanto houver jogador sem moedas.\n"
+            f"Sem saldo: {', '.join(broke_players)}.\n"
+            "Quem estiver sem moedas deve usar /pedir."
+        )
         return
         
     session.started = True
@@ -326,7 +669,7 @@ async def check_round_end(chat_id, session, context):
                     f"\n  Efeito: {curse_card.curse}"
                 )
 
-        await context.bot.send_message(chat_id, round_summary)
+        await safe_send_message(context, chat_id, round_summary)
 
         if session.round_winners:
             winners_text = ""
@@ -335,7 +678,8 @@ async def check_round_end(chat_id, session, context):
                 points = session.players[winner_id]["total"]
                 winners_text += f"\n- {user.user.first_name} com {points} pontos!"
 
-            await context.bot.send_message(
+            await safe_send_message(
+                context,
                 chat_id,
                 f"Fim da rodada {session.current_round}!\n"
                 f"Vencedor(es):{winners_text}\n"
@@ -344,7 +688,8 @@ async def check_round_end(chat_id, session, context):
                             for pid, score in session.scores.items()])
             )
         else:
-            await context.bot.send_message(
+            await safe_send_message(
+                context,
                 chat_id,
                 f"Fim da rodada {session.current_round}!\n"
                 "Nenhum vencedor nesta rodada - todos ultrapassaram 21!"
@@ -359,14 +704,16 @@ async def check_round_end(chat_id, session, context):
 
                 if len(winners) > 1:
                     session.max_rounds = 10
-                    await context.bot.send_message(
+                    await safe_send_message(
+                        context,
                         chat_id,
                         "Temos um empate! O jogo continuará automaticamente até 10 rodadas para desempate!"
                     )
                     await start_new_round(chat_id, session, context)
                     return
                 else:
-                    await context.bot.send_message(
+                    await safe_send_message(
+                        context,
                         chat_id,
                         "Fim das 5 rodadas iniciais!\nUse /continue para votar em mais 5 rodadas\nOu /end para encerrar o jogo"
                     )
@@ -385,7 +732,8 @@ async def start_new_round(chat_id, session, context):
         session.players[player_id]["message_id"] = None
         session.players[player_id]["last_round_curse"] = None
 
-    await context.bot.send_message(
+    await safe_send_message(
+        context,
         chat_id,
         f"Iniciando rodada {session.current_round} de {session.max_rounds}!\n"
         "Pegue suas cartas iniciais: /hit@TheCrowClub_bot"
@@ -411,8 +759,15 @@ async def hit_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Você não está participando deste jogo.")
         return
 
+    if get_player_balance(user_id) <= 0:
+        await update.message.reply_text(
+            "Voce esta sem moedas no meio da partida. A saida e proibida.\n"
+            "Peça de 3 a 12 moedas ao Mãos Sujas com /pedir."
+        )
+        return
+
     if session.players[user_id]["blinded"]:
-        await update.message.reply_text("Você está cego pelo 7 de Paus e terá sua rodada resolvida automaticamente até o fim da partida.")
+        await update.message.reply_text("Você está cego pelo 7 de Paus e Kaz irá jogar por você até o fim da partida. Confie no seu dealer.")
         return
 
     if session.players[user_id]["stand"]:
@@ -436,8 +791,8 @@ async def hit_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if total == 21:
         private_message += "Blackjack! 21 pontos!"
         player["stand"] = True
-        await context.bot.send_message(user_id, private_message)
-        await context.bot.send_message(chat_id, f"{user.first_name} finalizou a rodada.")
+        await safe_send_message(context, user_id, private_message)
+        await safe_send_message(context, chat_id, f"{user.first_name} finalizou a rodada.")
         await check_round_end(chat_id, session, context)
     elif total > 21:
         if any(card.value == "Joker" for card in player["hand"]):
@@ -455,14 +810,14 @@ async def hit_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"Sua punição será:\n"
             f"{curse_card.curse}"
         )
-        await context.bot.send_message(user_id, private_message)
+        await safe_send_message(context, user_id, private_message)
         player["stand"] = True
-        await context.bot.send_message(chat_id, f"{user.first_name} finalizou a rodada.")
+        await safe_send_message(context, chat_id, f"{user.first_name} finalizou a rodada.")
         await check_round_end(chat_id, session, context)
     else:
         private_message += "Use /hit para mais uma carta ou /stand para manter"
-        await context.bot.send_message(user_id, private_message)
-        await context.bot.send_message(chat_id, f"{user.first_name} pediu uma carta!")
+        await safe_send_message(context, user_id, private_message)
+        await safe_send_message(context, chat_id, f"{user.first_name} pediu uma carta!")
 
 async def stand_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
@@ -477,8 +832,15 @@ async def stand_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Você não está participando deste jogo.")
         return
 
+    if get_player_balance(user_id) <= 0:
+        await update.message.reply_text(
+            "Voce esta sem moedas no meio da partida. A saida e proibida.\n"
+            "Peça de 3 a 12 moedas ao Mãos Sujas com /pedir."
+        )
+        return
+
     if session.players[user_id]["blinded"]:
-        await update.message.reply_text("Você está cego pelo 7 de Paus e terá sua rodada resolvida automaticamente até o fim da partida.")
+        await update.message.reply_text("Você está cego pelo 7 de Paus e Kaz irá jogar por você até o fim da partida. Confie no seu dealer.")
         return
 
     if session.players[user_id]["stand"]:
@@ -497,8 +859,8 @@ async def stand_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     cards_text = "\n".join([f"{card.value} de {card.suit}" for card in player["hand"]])
     private_message = f"Suas cartas:\n{cards_text}\nTotal: {total}\n\nVocê manteve suas cartas!"
-    await context.bot.send_message(user_id, private_message)
-    await context.bot.send_message(chat_id, f"{user.first_name} finalizou a rodada.")
+    await safe_send_message(context, user_id, private_message)
+    await safe_send_message(context, chat_id, f"{user.first_name} finalizou a rodada.")
 
     await check_round_end(chat_id, session, context)
 
@@ -641,6 +1003,12 @@ async def end_game(chat_id, session, context):
                 "mas nao carregava maldicoes."
             )
 
+        money_curse_messages = await apply_final_money_curses(chat_id, session, cursed_player_id, context)
+        if money_curse_messages:
+            final_message += "\n\nConsequencias financeiras das maldições:"
+            final_message += "\n" + "\n".join(money_curse_messages)
+            final_message += f"\nKaz Brekker agora tem {get_dealer_balance(chat_id)} moeda(s)."
+
         absolved_names = [
             (await context.bot.get_chat_member(chat_id, player_id)).user.first_name
             for player_id in session.players.keys()
@@ -657,7 +1025,7 @@ async def end_game(chat_id, session, context):
             "Como nao houve uma unica pessoa em ultimo, todos foram absolvidos."
         )
 
-    await context.bot.send_message(chat_id, final_message)
+    await safe_send_message(context, chat_id, final_message)
     del active_sessions[chat_id]
 
 async def kill_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -695,14 +1063,26 @@ async def rules_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "13. Cada jogador começa com 10 moedas persistentes\n"
         "14. Ao fim da partida, cada perdedor transfere até 3 moedas ao vencedor\n"
         "15. Apenas quem ficar sozinho em ultimo lugar sofre as maldições finais\n"
+        "16. Kaz Brekker tem 1000 moedas por grupo e pode cobrar pelas maldições de Ouros\n"
+        "17. Se ficar sem moedas, use /pedir para pegar de 3 a 12 moedas emprestadas\n"
+        "18. Use /pay para pagar tudo que puder ou /pay 2 para pagar aos poucos\n"
         "⚠️ Jogue por sua conta e risco..."
     )
 
 def main():
     print('Iniciando bot...')
-    app = Application.builder().token(TOKEN).build()
+    app = (
+        Application.builder()
+        .token(TOKEN)
+        .connect_timeout(30)
+        .read_timeout(30)
+        .write_timeout(30)
+        .pool_timeout(30)
+        .build()
+    )
     
     #comandos
+    app.add_handler(ChatMemberHandler(bot_chat_member_update, ChatMemberHandler.MY_CHAT_MEMBER))
     app.add_handler(CommandHandler('start', start_command))
     app.add_handler(CommandHandler('create_blackjack', create_blackjack_command))
     app.add_handler(CommandHandler('join', join_command))
@@ -710,11 +1090,15 @@ def main():
     app.add_handler(CommandHandler('hit', hit_command))
     app.add_handler(CommandHandler('stand', stand_command))
     app.add_handler(CommandHandler('saldo', balance_command))
+    app.add_handler(CommandHandler('pedir', ask_loan_command))
+    app.add_handler(CommandHandler('pay', pay_debt_command))
     app.add_handler(CommandHandler('leave', leave_command))
     app.add_handler(CommandHandler('continue', continue_command))
     app.add_handler(CommandHandler('end', end_command))
     app.add_handler(CommandHandler('kill', kill_command))
     app.add_handler(CommandHandler('rules', rules_command))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, loan_amount_message))
+    app.add_error_handler(error_handler)
     
     print('Bot iniciado!')
     app.run_polling(poll_interval=1)
