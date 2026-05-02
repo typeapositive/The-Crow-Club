@@ -2,8 +2,58 @@ from typing import Final
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 import asyncio
+import json
 import random
+from pathlib import Path
 from blackjack_game import BlackjackGame, Card
+
+INITIAL_COINS = 10
+BLACKJACK_LOSS_COINS = 3
+BALANCES_FILE = Path(__file__).with_name("player_balances.json")
+
+player_balances = {}
+
+def load_player_balances():
+    if not BALANCES_FILE.exists():
+        return {}
+
+    try:
+        with BALANCES_FILE.open("r", encoding="utf-8") as file:
+            data = json.load(file)
+    except (json.JSONDecodeError, OSError):
+        return {}
+
+    return {str(user_id): int(coins) for user_id, coins in data.items()}
+
+def save_player_balances():
+    with BALANCES_FILE.open("w", encoding="utf-8") as file:
+        json.dump(player_balances, file, ensure_ascii=False, indent=2)
+
+def get_player_balance(user_id):
+    key = str(user_id)
+    if key not in player_balances:
+        player_balances[key] = INITIAL_COINS
+        save_player_balances()
+    return player_balances[key]
+
+def transfer_coins_to_winner(winner_id, loser_ids):
+    winner_key = str(winner_id)
+    get_player_balance(winner_id)
+
+    transfers = {}
+    total_received = 0
+    for loser_id in loser_ids:
+        loser_key = str(loser_id)
+        loser_balance = get_player_balance(loser_id)
+        transferred = min(BLACKJACK_LOSS_COINS, loser_balance)
+
+        player_balances[loser_key] = loser_balance - transferred
+        player_balances[winner_key] += transferred
+        transfers[loser_id] = transferred
+        total_received += transferred
+
+    save_player_balances()
+    return transfers, total_received
 
 def calculate_blackjack_score(hand):
     """Calcula a pontuacao da mao com a regra classica do Blackjack."""
@@ -89,6 +139,7 @@ class GameSession:
         self.current_player_index = 0  # índice do jogador atual
 
 active_sessions = {}  # chat_id: GameSession
+player_balances = load_player_balances()
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
@@ -100,6 +151,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/start_game - Inicia o jogo (apenas para o criador)\n"
         "/hit - Pede mais uma carta\n"
         "/stand - Mantém suas cartas\n"
+        "/saldo - Mostra quantas moedas voce tem\n"
         "/leave - Sair da mesa.\n"
         "/kill - Encerra a partida (apenas para o criador)\n"
         "/rules - Regras do Blackjack\n"
@@ -135,6 +187,11 @@ async def leave_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     session.scores.pop(user_id, None)
     await update.message.reply_text("Você saiu da mesa. Sorte sua que o jogo ainda não havia começado...")
 
+async def balance_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.message.from_user.id
+    balance = get_player_balance(user_id)
+    await update.message.reply_text(f"Voce tem {balance} moeda(s).")
+
 async def create_blackjack_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.message.chat_id
     user_id = update.message.from_user.id
@@ -146,10 +203,13 @@ async def create_blackjack_command(update: Update, context: ContextTypes.DEFAULT
     session = GameSession(user_id)
     session.players[user_id] = create_player_state()
     session.scores[user_id] = 0
+    get_player_balance(user_id)
     active_sessions[chat_id] = session
     
+    balance = get_player_balance(user_id)
     await update.message.reply_text(
         "🎲 Mesa de Blackjack criada!\n"
+        f"Seu saldo atual: {balance} moeda(s).\n"
         "Outros jogadores podem entrar usando /join@TheCrowClub_bot\n"
         "São necessários no mínimo 2 jogadores para começar.\n"
         "Quando todos estiverem prontos, use /start_game@TheCrowClub_bot"
@@ -179,7 +239,8 @@ async def join_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
     session.players[user_id] = create_player_state()
     session.scores[user_id] = 0
-    await update.message.reply_text(f"Jogador {update.message.from_user.first_name} entrou na mesa!")
+    balance = get_player_balance(user_id)
+    await update.message.reply_text(f"Jogador {update.message.from_user.first_name} entrou na mesa com {balance} moeda(s)!")
 
 async def start_game_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.message.chat_id
@@ -310,46 +371,7 @@ async def check_round_end(chat_id, session, context):
                         "Fim das 5 rodadas iniciais!\nUse /continue para votar em mais 5 rodadas\nOu /end para encerrar o jogo"
                     )
             else:
-                max_score = max(session.scores.values())
-                final_winners = [pid for pid, score in session.scores.items() if score == max_score]
-
-                if len(final_winners) == 1:
-                    final_winner_id = final_winners[0]
-                    losers = [player_id for player_id in session.players.keys() if player_id != final_winner_id]
-
-                    winner = await context.bot.get_chat_member(chat_id, final_winner_id)
-                    winner_name = winner.user.first_name
-
-                    winners_msg = (
-                        f"Fim do jogo!\n"
-                        f"Grande vencedor: {winner_name} com {max_score} pontos!\n"
-                        "As maldições foram neutralizadas para o vencedor!"
-                    )
-
-                    losers_msg = "\n\nPerdedores e suas maldições:"
-                    for loser_id in losers:
-                        user = await context.bot.get_chat_member(chat_id, loser_id)
-                        curses = [f"- {curse.curse}" for curse in session.players[loser_id]["curses"]]
-                        curse_hours = random.randint(1, 24)
-                        if curses:
-                            curses_text = "\n".join(curses)
-                            losers_msg += f"\n\n{user.user.first_name} sofrerá por {curse_hours} horas:\n{curses_text}"
-                        else:
-                            losers_msg += f"\n\n{user.user.first_name} escapou sem maldições!"
-
-                    await context.bot.send_message(chat_id, winners_msg + losers_msg)
-                    del active_sessions[chat_id]
-                else:
-                    winners_names = [
-                        (await context.bot.get_chat_member(chat_id, winner_id)).user.first_name
-                        for winner_id in final_winners
-                    ]
-                    await context.bot.send_message(
-                        chat_id,
-                        f"Fim do jogo!\nHouve um empate entre: {', '.join(winners_names)}\n"
-                        f"Cada um com {max_score} pontos!\nTodos os empatados terão suas maldições neutralizadas!"
-                    )
-                    del active_sessions[chat_id]
+                await end_game(chat_id, session, context)
         else:
             await start_new_round(chat_id, session, context)
 
@@ -564,47 +586,78 @@ async def end_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"Voto para encerrar registrado! Faltam {remaining} voto(s) para encerrar o jogo.")
 
 async def end_game(chat_id, session, context):
-    # Encontrar vencedor final
     max_score = max(session.scores.values())
+    min_score = min(session.scores.values())
     final_winners = [pid for pid, score in session.scores.items() if score == max_score]
-    
+    last_place_players = [pid for pid, score in session.scores.items() if score == min_score]
+    final_message = "🎉 Fim do jogo!\n"
+
     if len(final_winners) == 1:
         final_winner_id = final_winners[0]
         losers = [player_id for player_id in session.players.keys() if player_id != final_winner_id]
-        
+
         winner = await context.bot.get_chat_member(chat_id, final_winner_id)
         winner_name = winner.user.first_name
-        
-        winners_msg = (
-            f"🎉 Fim do jogo!\n"
-            f"Grande vencedor: {winner_name} com {max_score} pontos!\n"
-            f"As maldições foram neutralizadas para o vencedor!"
-        )
-        
-        losers_msg = "\n\nPerdedores e suas maldições:"
-        for loser_id in losers:
-            user = await context.bot.get_chat_member(chat_id, loser_id)
-            curses = [f"- {curse.curse}" for curse in session.players[loser_id]["curses"]]
-            curse_hours = random.randint(1, 24)
-            if curses:
-                curses_text = "\n".join(curses)
-                losers_msg += f"\n\n{user.user.first_name} sofrerá por {curse_hours} horas:\n{curses_text}"
-            else:
-                losers_msg += f"\n\n{user.user.first_name} escapou sem maldições!"
-        
-        await context.bot.send_message(chat_id, winners_msg + losers_msg)
+        transfers, total_received = transfer_coins_to_winner(final_winner_id, losers)
+
+        final_message += f"Grande vencedor: {winner_name} com {max_score} pontos!\n"
+        final_message += f"{winner_name} recebeu {total_received} moeda(s). Saldo atual: {get_player_balance(final_winner_id)} moeda(s)."
+
+        if transfers:
+            final_message += "\n\nTransferencias:"
+            for loser_id, amount in transfers.items():
+                loser = await context.bot.get_chat_member(chat_id, loser_id)
+                final_message += (
+                    f"\n- {loser.user.first_name} perdeu {amount} moeda(s). "
+                    f"Saldo atual: {get_player_balance(loser_id)} moeda(s)."
+                )
     else:
-        # Se houver empate
         winners_names = [
             (await context.bot.get_chat_member(chat_id, winner_id)).user.first_name 
             for winner_id in final_winners
         ]
-        await context.bot.send_message(
-            chat_id,
-            f"🎉 Fim do jogo!\nHouve um empate entre: {', '.join(winners_names)}\n"
-            f"Cada um com {max_score} pontos!\nTodos os empatados terão suas maldições neutralizadas!"
+        final_message += (
+            f"Houve um empate entre: {', '.join(winners_names)}\n"
+            f"Cada um com {max_score} pontos!\n"
+            "Como nao houve vencedor unico, nenhuma moeda foi transferida."
         )
-    
+
+    final_message += "\n\nMaldições finais:"
+    if len(last_place_players) == 1:
+        cursed_player_id = last_place_players[0]
+        cursed_user = await context.bot.get_chat_member(chat_id, cursed_player_id)
+        curses = [f"- {curse.curse}" for curse in session.players[cursed_player_id]["curses"]]
+        curse_hours = random.randint(1, 24)
+
+        if curses:
+            curses_text = "\n".join(curses)
+            final_message += (
+                f"\n{cursed_user.user.first_name} ficou em ultimo lugar com {min_score} ponto(s) "
+                f"e sofrera por {curse_hours} horas:\n{curses_text}"
+            )
+        else:
+            final_message += (
+                f"\n{cursed_user.user.first_name} ficou em ultimo lugar, "
+                "mas nao carregava maldicoes."
+            )
+
+        absolved_names = [
+            (await context.bot.get_chat_member(chat_id, player_id)).user.first_name
+            for player_id in session.players.keys()
+            if player_id != cursed_player_id
+        ]
+        final_message += f"\n\nAbsolvidos: {', '.join(absolved_names)}."
+    else:
+        tied_names = [
+            (await context.bot.get_chat_member(chat_id, player_id)).user.first_name
+            for player_id in last_place_players
+        ]
+        final_message += (
+            f"\nHouve empate no ultimo lugar entre: {', '.join(tied_names)}.\n"
+            "Como nao houve uma unica pessoa em ultimo, todos foram absolvidos."
+        )
+
+    await context.bot.send_message(chat_id, final_message)
     del active_sessions[chat_id]
 
 async def kill_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -639,6 +692,9 @@ async def rules_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "10. São 5 rodadas iniciais, podendo chegar a 10 se todos concordarem\n"
         "11. Fazer exatamente 21 pontos vale 2 pontos na rodada\n"
         "12. Vencer uma rodada normalmente vale 1 ponto\n"
+        "13. Cada jogador começa com 10 moedas persistentes\n"
+        "14. Ao fim da partida, cada perdedor transfere até 3 moedas ao vencedor\n"
+        "15. Apenas quem ficar sozinho em ultimo lugar sofre as maldições finais\n"
         "⚠️ Jogue por sua conta e risco..."
     )
 
@@ -653,6 +709,7 @@ def main():
     app.add_handler(CommandHandler('start_game', start_game_command))
     app.add_handler(CommandHandler('hit', hit_command))
     app.add_handler(CommandHandler('stand', stand_command))
+    app.add_handler(CommandHandler('saldo', balance_command))
     app.add_handler(CommandHandler('leave', leave_command))
     app.add_handler(CommandHandler('continue', continue_command))
     app.add_handler(CommandHandler('end', end_command))
