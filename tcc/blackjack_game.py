@@ -67,7 +67,7 @@ class BlackjackGame:
             },
             "8": {
                 "Copas": "Uma paixão proibida invade sua mente. Você se apaixona por um adversário.",
-                "Espadas": "Uma lâmina paira acima da cabeça. Esperando cair. Ela pode cair a qualquer momento, então é melhor não tirar os olhos dela. Sempre que você olhar para outro lugar, deverá rodar um D20 com a DT 5 para a lâmina não cair. Isso inclui quando você precisar olhar suas cartas. Piscar é permitido.",
+                "Espadas": "Uma lâmina paira acima da cabeça. Esperando cair. Ela pode cair a qualquer momento, então é melhor não tirar os olhos dela. Sempre que você olhar para outro lugar, deverá rodar 3D6 (DT 13). Isso inclui quando você precisar olhar suas cartas. Piscar é permitido.",
                 "Ouros": "Riqueza envenenada. Qualquer moeda que você olhar, brilhará como o sol.",
                 "Paus": "O tempo desacelera. Cada batida parece um século. Você só consegue falar em câmera lenta."
             },
@@ -92,7 +92,7 @@ class BlackjackGame:
             "Q": {
                 "Copas": "Você sente um amor profundo por algum de seus adversários, mas sabe que não é correspondido. Se você tocar essa pessoa, sua mão arde como fogo. Se olhar para ela, sente que está se afogando.",
                 "Espadas": "Um feitiço se prende à sua língua. Você não fala, você sussurra.",
-                "Ouros": "Eles sorriem para você, com olhos feitos de rubis. Você paralisa por cinco minutos sempre que olhar nos olhos de alguém, mas é muito tentador. Os rubis te atraem bastante. Sempre que olhar para alguém, rode um D20, DT 10 para lutar contra a vontade de olhar nos olhos.",
+                "Ouros": "Eles sorriem para você, com olhos feitos de rubis. Você paralisa por cinco minutos sempre que olhar nos olhos de alguém, mas é muito tentador. Os rubis te atraem bastante. Sempre que olhar para alguém, rode VONTADE ou FORÇA MENTAL para lutar contra a vontade de olhar nos olhos.",
                 "Paus": "Sua pele formiga. As runas antigas despertam sob sua carne. Seu corpo inteiro está coçando."
             },
             "K": {
