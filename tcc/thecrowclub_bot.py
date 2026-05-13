@@ -989,7 +989,7 @@ async def end_game(chat_id, session, context):
         cursed_player_id = last_place_players[0]
         cursed_user = await context.bot.get_chat_member(chat_id, cursed_player_id)
         curses = [f"- {curse.curse}" for curse in session.players[cursed_player_id]["curses"]]
-        curse_hours = random.randint(1, 24)
+        curse_hours = random.randint(1, 12)
 
         if curses:
             curses_text = "\n".join(curses)
