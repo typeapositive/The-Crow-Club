@@ -371,8 +371,7 @@ async def leave_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         cards_text = "\n".join([f"{card.value} de {card.suit}" for card in player["hand"]])
         
         await update.message.reply_text(
-            "🃏 As cartas em sua mão se recusam a deixar você ir. Você não pode deixar o jogo até o final da partida.\n\n"
-            "As cartas parecem apertar controlar sua vontade, lembrando que você fez um pacto ao entrar no jogo."
+            "🃏 As cartas em sua mão se recusam a deixar você ir. Você não pode deixar o jogo até o final da partida."
         )
         return
         
@@ -665,7 +664,7 @@ async def check_round_end(chat_id, session, context):
             if data["last_round_curse"] is not None:
                 curse_card = data["last_round_curse"]
                 round_summary += (
-                    f"\n  Maldição: {curse_card.value} de {curse_card.suit}"
+                    f"\n\n  Maldição: {curse_card.value} de {curse_card.suit}"
                     f"\n  Efeito: {curse_card.curse}"
                 )
 
@@ -985,21 +984,32 @@ async def end_game(chat_id, session, context):
         )
 
     final_message += "\n\nMaldições finais:"
-    if len(last_place_players) == 1:
-        cursed_player_id = last_place_players[0]
+    cursed_player_ids = last_place_players
+
+    if len(cursed_player_ids) > 1:
+        tied_names = [
+            (await context.bot.get_chat_member(chat_id, player_id)).user.first_name
+            for player_id in cursed_player_ids
+        ]
+        final_message += (
+            f"\n\nHouve empate no ultimo lugar entre: {', '.join(tied_names)}."
+            "\nTodos permanecem com suas maldicoes."
+        )
+
+    for cursed_player_id in cursed_player_ids:
         cursed_user = await context.bot.get_chat_member(chat_id, cursed_player_id)
         curses = [f"- {curse.curse}" for curse in session.players[cursed_player_id]["curses"]]
         curse_hours = random.randint(1, 12)
 
         if curses:
-            curses_text = "\n".join(curses)
+            curses_text = "\n\n".join(curses)
             final_message += (
-                f"\n{cursed_user.user.first_name} ficou em ultimo lugar com {min_score} ponto(s) "
-                f"e sofrera por {curse_hours} horas:\n{curses_text}"
+                f"\n\n{cursed_user.user.first_name} ficou em ultimo lugar com {min_score} ponto(s) "
+                f"e sofrera por {curse_hours} horas:\n\n{curses_text}"
             )
         else:
             final_message += (
-                f"\n{cursed_user.user.first_name} ficou em ultimo lugar, "
+                f"\n\n{cursed_user.user.first_name} ficou em ultimo lugar, "
                 "mas nao carregava maldicoes."
             )
 
@@ -1009,21 +1019,16 @@ async def end_game(chat_id, session, context):
             final_message += "\n" + "\n".join(money_curse_messages)
             final_message += f"\nKaz Brekker agora tem {get_dealer_balance(chat_id)} moeda(s)."
 
-        absolved_names = [
-            (await context.bot.get_chat_member(chat_id, player_id)).user.first_name
-            for player_id in session.players.keys()
-            if player_id != cursed_player_id
-        ]
+    absolved_names = [
+        (await context.bot.get_chat_member(chat_id, player_id)).user.first_name
+        for player_id in session.players.keys()
+        if player_id not in cursed_player_ids
+    ]
+
+    if absolved_names:
         final_message += f"\n\nAbsolvidos: {', '.join(absolved_names)}."
     else:
-        tied_names = [
-            (await context.bot.get_chat_member(chat_id, player_id)).user.first_name
-            for player_id in last_place_players
-        ]
-        final_message += (
-            f"\nHouve empate no ultimo lugar entre: {', '.join(tied_names)}.\n"
-            "Como nao houve uma unica pessoa em ultimo, todos foram absolvidos."
-        )
+        final_message += "\n\nNinguem foi absolvido."
 
     await safe_send_message(context, chat_id, final_message)
     del active_sessions[chat_id]
