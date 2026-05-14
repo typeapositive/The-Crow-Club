@@ -3,6 +3,7 @@ from telegram import Update
 from telegram.error import NetworkError, RetryAfter, TimedOut
 from telegram.ext import Application, ChatMemberHandler, CommandHandler, MessageHandler, filters, ContextTypes
 import asyncio
+import html
 import json
 import random
 from pathlib import Path
@@ -179,10 +180,10 @@ def remove_player_coins(user_id, amount):
     save_economy()
     return removed
 
-async def safe_send_message(context, chat_id, text):
+async def safe_send_message(context, chat_id, text, **kwargs):
     for attempt in range(2):
         try:
-            return await context.bot.send_message(chat_id, text)
+            return await context.bot.send_message(chat_id, text, **kwargs)
         except RetryAfter as error:
             if attempt == 0:
                 await asyncio.sleep(error.retry_after + 1)
@@ -195,6 +196,9 @@ async def safe_send_message(context, chat_id, text):
                 continue
             print(f"Falha ao enviar mensagem para {chat_id}: timeout/rede.")
             return None
+
+def mention_user(user):
+    return f'<a href="tg://user?id={user.id}">{html.escape(user.first_name)}</a>'
 
 def calculate_blackjack_score(hand):
     """Calcula a pontuacao da mao com a regra classica do Blackjack."""
@@ -714,10 +718,12 @@ async def check_round_end(chat_id, session, context):
             for winner_id in session.round_winners:
                 session.scores[winner_id] = session.scores.get(winner_id, 0) + 1
 
-        round_summary = f"Resultados da rodada {session.current_round}:\n"
+        round_summary = f"Resultados da rodada {session.current_round}:"
+        player_summaries = []
         for player_id, data in session.players.items():
             user = await context.bot.get_chat_member(chat_id, player_id)
-            cards_text = ", ".join([f"{card.value} de {card.suit}" for card in data["hand"]])
+            player_name = mention_user(user.user)
+            cards_text = html.escape(", ".join([f"{card.value} de {card.suit}" for card in data["hand"]]))
 
             if data["total"] > 21:
                 status = "Estourou"
@@ -726,18 +732,21 @@ async def check_round_end(chat_id, session, context):
             else:
                 status = "Perdeu"
 
-            round_summary += f"\n- {user.user.first_name}: {cards_text} (Total: {data['total']}) - {status}"
+            player_summary = f"- {player_name}: {cards_text} (Total: {data['total']}) - {status}"
 
             if data["last_round_curse"] is not None:
                 curse_card = data["last_round_curse"]
-                round_summary += (
+                player_summary += (
                     f"\n\n  Maldição: {curse_card.value} de {curse_card.suit}"
-                    f"\n  Efeito: {curse_card.curse}"
+                    f"\n  Efeito: {html.escape(curse_card.curse)}"
                 )
                 if data["last_round_money_curse_message"]:
-                    round_summary += f"\n  Moedas: {data['last_round_money_curse_message']}"
+                    player_summary += f"\n  Moedas: {html.escape(data['last_round_money_curse_message'])}"
 
-        await safe_send_message(context, chat_id, round_summary)
+            player_summaries.append(player_summary)
+
+        round_summary += "\n\n" + "\n\n".join(player_summaries)
+        await safe_send_message(context, chat_id, round_summary, parse_mode="HTML")
 
         if session.round_winners:
             winners_text = ""
