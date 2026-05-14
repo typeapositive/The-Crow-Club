@@ -15,6 +15,11 @@ BLACKJACK_LOSS_COINS = 3
 MIN_LOAN_COINS = 3
 MAX_LOAN_COINS = 12
 BALANCES_FILE = Path(__file__).with_name("player_balances.json")
+MONEY_LOSS_CURSES = {("Ouros", "2"), ("Ouros", "3"), ("Ouros", "4"), ("Ouros", "J"), ("Ouros", "K")}
+VANISHING_MONEY_CURSES = {("Ouros", "2")}
+DEFAULT_CURSE_WEIGHT = 10
+MONEY_LOSS_CURSE_WEIGHT = 3
+VANISHING_MONEY_CURSE_WEIGHT = 1
 
 player_balances = {}
 dealer_balances = {}
@@ -62,6 +67,14 @@ def get_player_balance(user_id):
         save_economy()
     return player_balances[key]
 
+def has_vanishing_money_curse(user_id):
+    _, session = find_user_session(user_id)
+    if session is None:
+        return False
+
+    player = session.players.get(user_id)
+    return player is not None and player.get("vanishing_money", False)
+
 def get_dealer_balance(chat_id):
     key = str(chat_id)
     if key not in dealer_balances:
@@ -74,7 +87,11 @@ def get_player_debt(user_id):
 
 def change_player_balance(user_id, amount):
     key = str(user_id)
-    player_balances[key] = max(0, get_player_balance(user_id) + amount)
+    current_balance = get_player_balance(user_id)
+    if amount > 0 and has_vanishing_money_curse(user_id):
+        return current_balance
+
+    player_balances[key] = max(0, current_balance + amount)
     save_economy()
     return player_balances[key]
 
@@ -95,7 +112,8 @@ def lend_from_dealer(chat_id, user_id, amount):
 
     loan = amount
     dealer_balances[dealer_key] -= loan
-    player_balances[user_key] += loan
+    if not has_vanishing_money_curse(user_id):
+        player_balances[user_key] += loan
     player_debts[user_key] = get_player_debt(user_id) + loan
     save_economy()
     return loan
@@ -134,9 +152,12 @@ def transfer_coins_to_winner(winner_id, loser_ids):
         transferred = min(BLACKJACK_LOSS_COINS, loser_balance)
 
         player_balances[loser_key] = loser_balance - transferred
-        player_balances[winner_key] += transferred
-        transfers[loser_id] = transferred
-        total_received += transferred
+        if has_vanishing_money_curse(winner_id):
+            transfers[loser_id] = transferred
+        else:
+            player_balances[winner_key] += transferred
+            transfers[loser_id] = transferred
+            total_received += transferred
 
     save_economy()
     return transfers, total_received
@@ -157,7 +178,8 @@ def transfer_player_to_player(from_user_id, to_user_id, amount):
     available = get_player_balance(from_user_id)
     transferred = min(amount, available)
     player_balances[from_key] = available - transferred
-    player_balances[to_key] = get_player_balance(to_user_id) + transferred
+    if not has_vanishing_money_curse(to_user_id):
+        player_balances[to_key] = get_player_balance(to_user_id) + transferred
     save_economy()
     return transferred
 
@@ -167,7 +189,8 @@ def refund_player_transfer(from_user_id, to_user_id, amount):
     get_player_balance(from_user_id)
     to_balance = get_player_balance(to_user_id)
 
-    player_balances[from_key] += amount
+    if not has_vanishing_money_curse(from_user_id):
+        player_balances[from_key] += amount
     player_balances[to_key] = max(0, to_balance - amount)
     save_economy()
     return amount
@@ -240,7 +263,19 @@ def create_player_state():
         "last_round_curse": None,
         "last_round_money_curse_message": None,
         "curse_transfers": [],
+        "vanishing_money": False,
     }
+
+def get_curse_weight(card):
+    curse_id = (card.suit, card.value)
+    if curse_id in VANISHING_MONEY_CURSES:
+        return VANISHING_MONEY_CURSE_WEIGHT
+    if curse_id in MONEY_LOSS_CURSES:
+        return MONEY_LOSS_CURSE_WEIGHT
+    return DEFAULT_CURSE_WEIGHT
+
+def choose_curse_card(cards):
+    return random.choices(cards, weights=[get_curse_weight(card) for card in cards], k=1)[0]
 
 def apply_curse_to_player(player, curse_card):
     player["curses"].append(curse_card)
@@ -248,10 +283,21 @@ def apply_curse_to_player(player, curse_card):
 
     if curse_card.value == "7" and curse_card.suit == "Paus":
         player["blinded"] = True
+    if (curse_card.suit, curse_card.value) in VANISHING_MONEY_CURSES:
+        player["vanishing_money"] = True
 
 async def apply_immediate_curse_effects(chat_id, session, cursed_player_id, curse_card, context):
-    if curse_card.suit != "Ouros" or curse_card.value != "3":
+    if curse_card.suit != "Ouros" or curse_card.value not in ["2", "3"]:
         return None
+
+    if curse_card.value == "2":
+        cursed_user = await context.bot.get_chat_member(chat_id, cursed_player_id)
+        current_balance = get_player_balance(cursed_player_id)
+        amount = remove_player_coins(cursed_player_id, current_balance)
+        return (
+            f"{cursed_user.user.first_name} perdeu {amount} moeda(s). "
+            "Qualquer moeda que entrar no bolso tambem desaparecera ate a maldicao terminar."
+        )
 
     adversaries = [player_id for player_id in session.players.keys() if player_id != cursed_player_id]
     if not adversaries:
@@ -296,9 +342,9 @@ async def auto_resolve_blinded_player(chat_id, session, player_id, context):
 
     if player["total"] > 21:
         if any(card.value == "Joker" for card in player["hand"]):
-            curse_card = random.choice(game._create_deck())
+            curse_card = choose_curse_card(game._create_deck())
         else:
-            curse_card = random.choice(player["hand"])
+            curse_card = choose_curse_card(player["hand"])
         apply_curse_to_player(player, curse_card)
         player["last_round_money_curse_message"] = await apply_immediate_curse_effects(
             chat_id,
@@ -321,7 +367,7 @@ def get_loan_chat_id(message_chat_id, user_id):
 async def apply_money_curse(chat_id, session, cursed_player_id, curse_card, context):
     if curse_card.suit != "Ouros":
         return None
-    if curse_card.value == "3":
+    if curse_card.value in ["2", "3"]:
         return None
 
     cursed_user = await context.bot.get_chat_member(chat_id, cursed_player_id)
@@ -506,6 +552,8 @@ async def ask_loan_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"Kaz Brekker emprestou {loan} moeda(s).\n"
             f"Sua divida com o Mãos Sujas: {get_player_debt(user_id)} moeda(s)."
         )
+        if has_vanishing_money_curse(user_id):
+            await update.message.reply_text("As moedas desapareceram antes de ficarem no seu bolso.")
         return
 
     context.user_data["awaiting_loan_amount"] = True
@@ -538,6 +586,8 @@ async def loan_amount_message(update: Update, context: ContextTypes.DEFAULT_TYPE
         f"Kaz Brekker emprestou {loan} moeda(s).\n"
         f"Sua divida com o Mãos Sujas: {get_player_debt(user_id)} moeda(s)."
     )
+    if has_vanishing_money_curse(user_id):
+        await update.message.reply_text("As moedas desapareceram antes de ficarem no seu bolso.")
 
 async def pay_debt_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
@@ -875,9 +925,9 @@ async def hit_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif total > 21:
         if any(card.value == "Joker" for card in player["hand"]):
             all_curses = session.game._create_deck()
-            curse_card = random.choice(all_curses)
+            curse_card = choose_curse_card(all_curses)
         else:
-            curse_card = random.choice(player["hand"])
+            curse_card = choose_curse_card(player["hand"])
 
         apply_curse_to_player(player, curse_card)
         money_curse_message = await apply_immediate_curse_effects(
