@@ -160,6 +160,17 @@ def transfer_player_to_player(from_user_id, to_user_id, amount):
     save_economy()
     return transferred
 
+def refund_player_transfer(from_user_id, to_user_id, amount):
+    from_key = str(from_user_id)
+    to_key = str(to_user_id)
+    get_player_balance(from_user_id)
+    to_balance = get_player_balance(to_user_id)
+
+    player_balances[from_key] += amount
+    player_balances[to_key] = max(0, to_balance - amount)
+    save_economy()
+    return amount
+
 def remove_player_coins(user_id, amount):
     user_key = str(user_id)
     available = get_player_balance(user_id)
@@ -223,6 +234,8 @@ def create_player_state():
         "curses": [],
         "blinded": False,
         "last_round_curse": None,
+        "last_round_money_curse_message": None,
+        "curse_transfers": [],
     }
 
 def apply_curse_to_player(player, curse_card):
@@ -232,12 +245,50 @@ def apply_curse_to_player(player, curse_card):
     if curse_card.value == "7" and curse_card.suit == "Paus":
         player["blinded"] = True
 
-def auto_resolve_blinded_player(player, game):
+async def apply_immediate_curse_effects(chat_id, session, cursed_player_id, curse_card, context):
+    if curse_card.suit != "Ouros" or curse_card.value != "3":
+        return None
+
+    adversaries = [player_id for player_id in session.players.keys() if player_id != cursed_player_id]
+    if not adversaries:
+        return None
+
+    cursed_user = await context.bot.get_chat_member(chat_id, cursed_player_id)
+    recipient_id = adversaries[0] if len(adversaries) == 1 else random.choice(adversaries)
+    recipient = await context.bot.get_chat_member(chat_id, recipient_id)
+    current_balance = get_player_balance(cursed_player_id)
+    amount = transfer_player_to_player(cursed_player_id, recipient_id, current_balance)
+
+    if amount <= 0:
+        return (
+            f"{cursed_user.user.first_name} recebeu o 3 de Ouros, "
+            "mas nao tinha moedas para transferir."
+        )
+
+    session.players[cursed_player_id]["curse_transfers"].append(
+        {
+            "from": cursed_player_id,
+            "to": recipient_id,
+            "amount": amount,
+            "curse": "3 de Ouros",
+            "refunded": False,
+        }
+    )
+
+    return (
+        f"{cursed_user.user.first_name} perdeu {amount} moeda(s) para "
+        f"{recipient.user.first_name} por causa do 3 de Ouros."
+    )
+
+async def auto_resolve_blinded_player(chat_id, session, player_id, context):
+    player = session.players[player_id]
+    game = session.game
     num_cards = random.randint(2, 5)
     player["hand"] = [game._draw_card() for _ in range(num_cards)]
     player["total"] = calculate_blackjack_score(player["hand"])
     player["stand"] = True
     player["last_round_curse"] = None
+    player["last_round_money_curse_message"] = None
 
     if player["total"] > 21:
         if any(card.value == "Joker" for card in player["hand"]):
@@ -245,6 +296,13 @@ def auto_resolve_blinded_player(player, game):
         else:
             curse_card = random.choice(player["hand"])
         apply_curse_to_player(player, curse_card)
+        player["last_round_money_curse_message"] = await apply_immediate_curse_effects(
+            chat_id,
+            session,
+            player_id,
+            curse_card,
+            context,
+        )
 
 def is_player_broke_in_active_game(user_id):
     chat_id, session = find_user_session(user_id)
@@ -259,6 +317,8 @@ def get_loan_chat_id(message_chat_id, user_id):
 async def apply_money_curse(chat_id, session, cursed_player_id, curse_card, context):
     if curse_card.suit != "Ouros":
         return None
+    if curse_card.value == "3":
+        return None
 
     cursed_user = await context.bot.get_chat_member(chat_id, cursed_player_id)
     cursed_name = cursed_user.user.first_name
@@ -269,20 +329,6 @@ async def apply_money_curse(chat_id, session, cursed_player_id, curse_card, cont
         return (
             f"- {cursed_name} perdeu {amount} moeda(s) para Kaz Brekker "
             f"por causa do {curse_card.value} de Ouros."
-        )
-
-    if curse_card.value == "3":
-        adversaries = [player_id for player_id in session.players.keys() if player_id != cursed_player_id]
-        if not adversaries:
-            amount = transfer_player_to_dealer(chat_id, cursed_player_id, current_balance)
-            return f"- {cursed_name} perdeu {amount} moeda(s) para Kaz Brekker."
-
-        recipient_id = adversaries[0] if len(adversaries) == 1 else random.choice(adversaries)
-        amount = transfer_player_to_player(cursed_player_id, recipient_id, current_balance)
-        recipient = await context.bot.get_chat_member(chat_id, recipient_id)
-        return (
-            f"- {cursed_name} perdeu {amount} moeda(s) para {recipient.user.first_name} "
-            "por causa do 3 de Ouros."
         )
 
     if curse_card.value == "4":
@@ -305,6 +351,27 @@ async def apply_final_money_curses(chat_id, session, cursed_player_id, context):
         if message:
             money_messages.append(message)
     return money_messages
+
+async def refund_absolved_curse_transfers(chat_id, session, absolved_player_ids, context):
+    refund_messages = []
+
+    for player_id in absolved_player_ids:
+        player = session.players[player_id]
+        for transfer in player["curse_transfers"]:
+            if transfer["refunded"]:
+                continue
+
+            refund_player_transfer(player_id, transfer["to"], transfer["amount"])
+            transfer["refunded"] = True
+
+            cursed_user = await context.bot.get_chat_member(chat_id, player_id)
+            recipient = await context.bot.get_chat_member(chat_id, transfer["to"])
+            refund_messages.append(
+                f"- {cursed_user.user.first_name} recebeu de volta {transfer['amount']} moeda(s) "
+                f"que tinham ido para {recipient.user.first_name} pelo {transfer['curse']}."
+            )
+
+    return refund_messages
 
 # configurações do bot
 TOKEN: Final = '7760039811:AAE-JNN14Gd5ZodjP9xpDakRyde1qKBuD5k'
@@ -667,6 +734,8 @@ async def check_round_end(chat_id, session, context):
                     f"\n\n  Maldição: {curse_card.value} de {curse_card.suit}"
                     f"\n  Efeito: {curse_card.curse}"
                 )
+                if data["last_round_money_curse_message"]:
+                    round_summary += f"\n  Moedas: {data['last_round_money_curse_message']}"
 
         await safe_send_message(context, chat_id, round_summary)
 
@@ -730,6 +799,7 @@ async def start_new_round(chat_id, session, context):
         session.players[player_id]["stand"] = False
         session.players[player_id]["message_id"] = None
         session.players[player_id]["last_round_curse"] = None
+        session.players[player_id]["last_round_money_curse_message"] = None
 
     await safe_send_message(
         context,
@@ -740,7 +810,7 @@ async def start_new_round(chat_id, session, context):
 
     for player_id, player in session.players.items():
         if player["blinded"]:
-            auto_resolve_blinded_player(player, session.game)
+            await auto_resolve_blinded_player(chat_id, session, player_id, context)
 
     if all(player["stand"] for player in session.players.values()):
         await check_round_end(chat_id, session, context)
@@ -801,6 +871,14 @@ async def hit_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             curse_card = random.choice(player["hand"])
 
         apply_curse_to_player(player, curse_card)
+        money_curse_message = await apply_immediate_curse_effects(
+            chat_id,
+            session,
+            user_id,
+            curse_card,
+            context,
+        )
+        player["last_round_money_curse_message"] = money_curse_message
 
         private_message = (
             f"Você ultrapassou 21 com {total} pontos!\n"
@@ -809,6 +887,8 @@ async def hit_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"Sua punição será:\n"
             f"{curse_card.curse}"
         )
+        if money_curse_message:
+            private_message += f"\n\nMoedas: {money_curse_message}"
         await safe_send_message(context, user_id, private_message)
         player["stand"] = True
         await safe_send_message(context, chat_id, f"{user.first_name} finalizou a rodada.")
@@ -1024,9 +1104,23 @@ async def end_game(chat_id, session, context):
         for player_id in session.players.keys()
         if player_id not in cursed_player_ids
     ]
+    absolved_player_ids = [
+        player_id
+        for player_id in session.players.keys()
+        if player_id not in cursed_player_ids
+    ]
 
     if absolved_names:
         final_message += f"\n\nAbsolvidos: {', '.join(absolved_names)}."
+        refund_messages = await refund_absolved_curse_transfers(
+            chat_id,
+            session,
+            absolved_player_ids,
+            context,
+        )
+        if refund_messages:
+            final_message += "\n\nDevoluções do 3 de Ouros:"
+            final_message += "\n" + "\n".join(refund_messages)
     else:
         final_message += "\n\nNinguem foi absolvido."
 
