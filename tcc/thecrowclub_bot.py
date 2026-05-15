@@ -382,8 +382,12 @@ async def apply_money_curse(chat_id, session, cursed_player_id, curse_card, cont
         )
 
     if curse_card.value == "4":
-        amount = remove_player_coins(cursed_player_id, current_balance)
-        return f"- {cursed_name} perdeu {amount} moeda(s): o ouro virou po por causa do 4 de Ouros."
+        amount = (current_balance + 1) // 2
+        removed = remove_player_coins(cursed_player_id, amount)
+        return (
+            f"- {cursed_name} perdeu {removed} moeda(s): "
+            "o ouro foi diminuido pela metade por causa do 4 de Ouros."
+        )
 
     if curse_card.value == "J":
         amount = remove_player_coins(cursed_player_id, current_balance)

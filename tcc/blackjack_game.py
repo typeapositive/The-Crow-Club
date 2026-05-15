@@ -25,7 +25,7 @@ class BlackjackGame:
         curses = {
             "A": {
                 "Copas": "O seu sangue pulsa fora do ritmo. Seu coração pesa como chumbo. Você sente muita tristeza e seu passado assombra seus pensamentos.",
-                "Espadas": "Uma lâmina invisível encosta na sua nuca. A dor é silenciosa, mas real. Não faça movimentos bruscos, ou ela cortará sua pele.",
+                "Espadas": "Uma lâmina invisível encosta na sua nuca. Não faça movimentos bruscos, ou ela cortará sua pele. Rode DESTREZA para não ser cortado.",
                 "Ouros": "Os dedos ardem ao tocar o ouro. Tudo que reluz te rejeita e queima a sua pele.",
                 "Paus": "Sussurros ecoam ao seu redor. Eles sabem o que você fez. E o que você quer fazer. Você entra em estado de paranoia."
             },
@@ -43,8 +43,8 @@ class BlackjackGame:
             },
             "4": {
                 "Copas": "O ar ao seu redor congela. Os outros não parecem notar. Você está com muito, muito frio.",
-                "Espadas": "Sente-se observado. Os olhos... eles não piscam. Você vê dois olhos em todo canto escuro que olhar. Eles são assustadores.",
-                "Ouros": "Toque de Midas ao contrário. Todo ouro que você tocar, vai se transformar em pó.",
+                "Espadas": "Você se sente observado. Os olhos... eles não piscam. Você vê dois olhos em todo canto escuro que olhar. Eles são assustadores.",
+                "Ouros": "Toque de Midas ao contrário. Todo o ouro que você tem será diminuído pela metade.",
                 "Paus": "Sua voz ecoa com fora do seu controle. Você não consegue falar, mas pode gritar."
             },
             "5": {
