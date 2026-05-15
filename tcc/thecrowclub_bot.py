@@ -17,6 +17,10 @@ MAX_LOAN_COINS = 12
 BALANCES_FILE = Path(__file__).with_name("player_balances.json")
 MONEY_LOSS_CURSES = {("Ouros", "2"), ("Ouros", "3"), ("Ouros", "4"), ("Ouros", "J"), ("Ouros", "K")}
 VANISHING_MONEY_CURSES = {("Ouros", "2")}
+INCOMPATIBLE_CURSES = {
+    ("Paus", "4"): {("Espadas", "Q")},
+    ("Espadas", "Q"): {("Paus", "4")},
+}
 DEFAULT_CURSE_WEIGHT = 10
 MONEY_LOSS_CURSE_WEIGHT = 3
 VANISHING_MONEY_CURSE_WEIGHT = 1
@@ -274,8 +278,27 @@ def get_curse_weight(card):
         return MONEY_LOSS_CURSE_WEIGHT
     return DEFAULT_CURSE_WEIGHT
 
-def choose_curse_card(cards):
-    return random.choices(cards, weights=[get_curse_weight(card) for card in cards], k=1)[0]
+def get_curse_id(card):
+    return (card.suit, card.value)
+
+def is_compatible_curse(player, curse_card):
+    curse_id = get_curse_id(curse_card)
+    blocked_curses = {
+        blocked_curse
+        for active_curse in player["curses"]
+        for blocked_curse in INCOMPATIBLE_CURSES.get(get_curse_id(active_curse), set())
+    }
+    return curse_id not in blocked_curses
+
+def choose_curse_card(cards, player):
+    compatible_cards = [card for card in cards if is_compatible_curse(player, card)]
+    if not compatible_cards:
+        return None
+    return random.choices(
+        compatible_cards,
+        weights=[get_curse_weight(card) for card in compatible_cards],
+        k=1,
+    )[0]
 
 def apply_curse_to_player(player, curse_card):
     player["curses"].append(curse_card)
@@ -342,9 +365,11 @@ async def auto_resolve_blinded_player(chat_id, session, player_id, context):
 
     if player["total"] > 21:
         if any(card.value == "Joker" for card in player["hand"]):
-            curse_card = choose_curse_card(game._create_deck())
+            curse_card = choose_curse_card(game._create_deck(), player)
         else:
-            curse_card = choose_curse_card(player["hand"])
+            curse_card = choose_curse_card(player["hand"], player)
+            if curse_card is None:
+                curse_card = choose_curse_card(game._create_deck(), player)
         apply_curse_to_player(player, curse_card)
         player["last_round_money_curse_message"] = await apply_immediate_curse_effects(
             chat_id,
@@ -929,9 +954,11 @@ async def hit_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif total > 21:
         if any(card.value == "Joker" for card in player["hand"]):
             all_curses = session.game._create_deck()
-            curse_card = choose_curse_card(all_curses)
+            curse_card = choose_curse_card(all_curses, player)
         else:
-            curse_card = choose_curse_card(player["hand"])
+            curse_card = choose_curse_card(player["hand"], player)
+            if curse_card is None:
+                curse_card = choose_curse_card(session.game._create_deck(), player)
 
         apply_curse_to_player(player, curse_card)
         money_curse_message = await apply_immediate_curse_effects(
