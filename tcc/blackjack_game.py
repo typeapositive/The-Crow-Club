@@ -49,8 +49,8 @@ class BlackjackGame:
             },
             "5": {
                 "Copas": "Uma memória esquecida ressurge. Você queria mantê-la enterrada. Ela está vívida demais e você tem alucinações visuais e auditivas sobre ela.",
-                "Espadas": "O cheiro de ferro preenche o ar. Suas mãos estão cobertas de sangue. Tudo que você tocar, vai sangrar. Mas só você pode ver.",
-                "Ouros": "O ouro pesa mais do que devia. Você carrega culpa com ele. Seus bolsos se enchem de ouro, mas cada vez que gastar, revive a sua pior memória.",
+                "Espadas": "Você sente cheiro forte de ferro. Suas mãos estão cobertas de sangue. Tudo que você tocar, vai sangrar. Mas só você pode ver.",
+                "Ouros": "Não é uma maldição. Seus bolsos se enchem de ouro.",
                 "Paus": "Risos abafados se espalham pelas sombras. Estão rindo de você? Você sente uma paranoia profunda."
             },
             "6": {
@@ -204,12 +204,12 @@ class BlackjackGame:
         dealer_score = self.get_dealer_score()
 
         if player_score > 21:
-            return "💀 Você estourou! A maldição das cartas te atingiu..."
+            return "Você estourou! A maldição das cartas te atingiu..."
         elif dealer_score > 21:
-            return "🎉 O dealer estourou! Você venceu!"
+            return "O dealer estourou! Você venceu!"
         elif player_score > dealer_score:
-            return "🎉 Você venceu!"
+            return "Você venceu!"
         elif player_score < dealer_score:
-            return "😈 O dealer venceu!"
+            return "O dealer venceu!"
         else:
-            return "🤝 Empate!"
+            return "Empate!"
