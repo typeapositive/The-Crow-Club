@@ -379,6 +379,9 @@ def get_curse_id(card):
 
 def is_compatible_curse(player, curse_card):
     curse_id = get_curse_id(curse_card)
+    if curse_id in {get_curse_id(active_curse) for active_curse in player["curses"]}:
+        return False
+
     blocked_curses = {
         blocked_curse
         for active_curse in player["curses"]
@@ -387,11 +390,10 @@ def is_compatible_curse(player, curse_card):
     return curse_id not in blocked_curses
 
 def choose_curse_card(cards, player, session=None):
-    used_curse_ids = session.used_curse_ids if session is not None else set()
     compatible_cards = [
         card
         for card in cards
-        if get_curse_id(card) not in used_curse_ids and is_compatible_curse(player, card)
+        if is_compatible_curse(player, card)
     ]
     if not compatible_cards:
         return None
@@ -404,8 +406,6 @@ def choose_curse_card(cards, player, session=None):
 def apply_curse_to_player(player, curse_card, session=None):
     player["curses"].append(curse_card)
     player["last_round_curse"] = curse_card
-    if session is not None:
-        session.used_curse_ids.add(get_curse_id(curse_card))
 
     if curse_card.value == "7" and curse_card.suit == "Paus":
         player["blinded"] = True
@@ -589,7 +589,6 @@ class GameSession:
         self.round_winners = []  # lista de vencedores da rodada atual
         self.player_order = []  # ordem dos jogadores para jogar
         self.current_player_index = 0  # índice do jogador atual
-        self.used_curse_ids = set()
 
 active_sessions = {}  # chat_id: GameSession
 player_balances, dealer_balances, player_debts = load_economy()
@@ -610,7 +609,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/doar @usuário quantia - Doa moedas para outro jogador da mesa\n"
         "/pedir - Pede 3 a 12 moedas emprestadas ao Mãos Sujas\n"
         "/pay - Paga sua dívida com o Mãos Sujas\n"
-        "/kick @usuário - Expulsa alguém da mesa (apenas @dirthands)\n"
+        "/kick @usuário - Expulsa alguém da mesa.\n"
         "/leave - Sair da mesa.\n"
         "/kill - Encerra a partida (apenas para o criador)\n"
         "/rules - Regras do Blackjack\n"
