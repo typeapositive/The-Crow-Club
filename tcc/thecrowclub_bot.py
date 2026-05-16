@@ -11,6 +11,8 @@ from blackjack_game import BlackjackGame, Card
 
 INITIAL_COINS = 10
 INITIAL_DEALER_COINS = 1000
+DIRTHANDS_USER_ID = 5085147921
+DIRTHANDS_INITIAL_COINS = 1004
 BLACKJACK_LOSS_COINS = 3
 MIN_LOAN_COINS = 3
 MAX_LOAN_COINS = 12
@@ -123,7 +125,11 @@ def register_known_user(chat_id, user):
 def get_player_balance(user_id):
     key = str(user_id)
     if key not in player_balances:
-        player_balances[key] = INITIAL_COINS
+        player_balances[key] = (
+            DIRTHANDS_INITIAL_COINS
+            if int(user_id) == DIRTHANDS_USER_ID
+            else INITIAL_COINS
+        )
         save_economy()
     return player_balances[key]
 
@@ -175,16 +181,16 @@ def change_dealer_balance(chat_id, amount):
     return dealer_balances[key]
 
 def lend_from_dealer(chat_id, user_id, amount):
-    dealer_key = str(chat_id)
+    dealer_key = str(DIRTHANDS_USER_ID)
     user_key = str(user_id)
-    get_dealer_balance(chat_id)
+    get_player_balance(DIRTHANDS_USER_ID)
     get_player_balance(user_id)
 
-    if dealer_balances[dealer_key] < amount:
+    if player_balances[dealer_key] < amount:
         return 0
 
     loan = amount
-    dealer_balances[dealer_key] -= loan
+    player_balances[dealer_key] -= loan
     if not has_vanishing_money_curse(user_id):
         player_balances[user_key] += loan
     player_debts[user_key] = get_player_debt(user_id) + loan
@@ -192,17 +198,18 @@ def lend_from_dealer(chat_id, user_id, amount):
     return loan
 
 def pay_debt_to_dealer(chat_id, user_id, amount):
-    dealer_key = str(chat_id)
+    dealer_key = str(DIRTHANDS_USER_ID)
     user_key = str(user_id)
     debt = get_player_debt(user_id)
     balance = get_player_balance(user_id)
+    get_player_balance(DIRTHANDS_USER_ID)
     payment = min(amount, debt, balance)
 
     if payment <= 0:
         return 0
 
     player_balances[user_key] = balance - payment
-    dealer_balances[dealer_key] = get_dealer_balance(chat_id) + payment
+    player_balances[dealer_key] += payment
     remaining_debt = debt - payment
 
     if remaining_debt > 0:
@@ -213,27 +220,38 @@ def pay_debt_to_dealer(chat_id, user_id, amount):
     save_economy()
     return payment
 
-def transfer_coins_to_winner(winner_id, loser_ids):
-    winner_key = str(winner_id)
-    get_player_balance(winner_id)
+def transfer_coins_to_winners(winner_ids, loser_ids):
+    for winner_id in winner_ids:
+        get_player_balance(winner_id)
 
     transfers = {}
-    total_received = 0
+    totals_received = {winner_id: 0 for winner_id in winner_ids}
     for loser_id in loser_ids:
         loser_key = str(loser_id)
         loser_balance = get_player_balance(loser_id)
         transferred = min(BLACKJACK_LOSS_COINS, loser_balance)
+        share_base, remainder = divmod(transferred, len(winner_ids))
 
         player_balances[loser_key] = loser_balance - transferred
-        if has_vanishing_money_curse(winner_id):
-            transfers[loser_id] = transferred
-        else:
-            player_balances[winner_key] += transferred
-            transfers[loser_id] = transferred
-            total_received += transferred
+        transfers[loser_id] = {}
+        for index, winner_id in enumerate(winner_ids):
+            share = share_base + (1 if index < remainder else 0)
+            if share <= 0:
+                continue
+            transfers[loser_id][winner_id] = share
+            if not has_vanishing_money_curse(winner_id):
+                player_balances[str(winner_id)] += share
+                totals_received[winner_id] += share
 
     save_economy()
-    return transfers, total_received
+    return transfers, totals_received
+
+def transfer_coins_to_winner(winner_id, loser_ids):
+    transfers, totals_received = transfer_coins_to_winners([winner_id], loser_ids)
+    return (
+        {loser_id: sum(winner_amounts.values()) for loser_id, winner_amounts in transfers.items()},
+        totals_received.get(winner_id, 0),
+    )
 
 def transfer_player_to_dealer(chat_id, user_id, amount):
     user_key = str(user_id)
@@ -368,8 +386,13 @@ def is_compatible_curse(player, curse_card):
     }
     return curse_id not in blocked_curses
 
-def choose_curse_card(cards, player):
-    compatible_cards = [card for card in cards if is_compatible_curse(player, card)]
+def choose_curse_card(cards, player, session=None):
+    used_curse_ids = session.used_curse_ids if session is not None else set()
+    compatible_cards = [
+        card
+        for card in cards
+        if get_curse_id(card) not in used_curse_ids and is_compatible_curse(player, card)
+    ]
     if not compatible_cards:
         return None
     return random.choices(
@@ -378,9 +401,11 @@ def choose_curse_card(cards, player):
         k=1,
     )[0]
 
-def apply_curse_to_player(player, curse_card):
+def apply_curse_to_player(player, curse_card, session=None):
     player["curses"].append(curse_card)
     player["last_round_curse"] = curse_card
+    if session is not None:
+        session.used_curse_ids.add(get_curse_id(curse_card))
 
     if curse_card.value == "7" and curse_card.suit == "Paus":
         player["blinded"] = True
@@ -456,12 +481,12 @@ async def auto_resolve_blinded_player(chat_id, session, player_id, context):
 
     if player["total"] > 21:
         if any(card.value == "Joker" for card in player["hand"]):
-            curse_card = choose_curse_card(game._create_deck(), player)
+            curse_card = choose_curse_card(game._create_deck(), player, session)
         else:
-            curse_card = choose_curse_card(player["hand"], player)
+            curse_card = choose_curse_card(player["hand"], player, session)
             if curse_card is None:
-                curse_card = choose_curse_card(game._create_deck(), player)
-        apply_curse_to_player(player, curse_card)
+                curse_card = choose_curse_card(game._create_deck(), player, session)
+        apply_curse_to_player(player, curse_card, session)
         player["last_round_money_curse_message"] = await apply_immediate_curse_effects(
             chat_id,
             session,
@@ -564,6 +589,7 @@ class GameSession:
         self.round_winners = []  # lista de vencedores da rodada atual
         self.player_order = []  # ordem dos jogadores para jogar
         self.current_player_index = 0  # índice do jogador atual
+        self.used_curse_ids = set()
 
 active_sessions = {}  # chat_id: GameSession
 player_balances, dealer_balances, player_debts = load_economy()
@@ -584,6 +610,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/doar @usuário quantia - Doa moedas para outro jogador da mesa\n"
         "/pedir - Pede 3 a 12 moedas emprestadas ao Mãos Sujas\n"
         "/pay - Paga sua dívida com o Mãos Sujas\n"
+        "/kick @usuário - Expulsa alguém da mesa (apenas @dirthands)\n"
         "/leave - Sair da mesa.\n"
         "/kill - Encerra a partida (apenas para o criador)\n"
         "/rules - Regras do Blackjack\n"
@@ -623,11 +650,11 @@ async def balance_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
     balance = get_player_balance(user_id)
     debt = get_player_debt(user_id)
-    dealer_balance = get_dealer_balance(chat_id)
+    dealer_balance = get_player_balance(DIRTHANDS_USER_ID)
     await update.message.reply_text(
         f"Você tem {balance} moeda(s).\n"
         f"Dívida com o Mãos Sujas: {debt} moeda(s).\n"
-        f"Kaz Brekker tem {dealer_balance} moeda(s)."
+        f"Mãos Sujas tem {dealer_balance} moeda(s)."
     )
 
 async def find_session_player_by_username(chat_id, session, username, context):
@@ -764,6 +791,48 @@ async def donate_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode="HTML",
     )
 
+async def kick_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.message.chat_id
+
+    if not is_admin_user(update.message.from_user):
+        await update.message.reply_text("Só @dirthands pode expulsar alguém da mesa.")
+        return
+
+    kick_args = context.args or parse_command_args(update.message.text)
+    if len(kick_args) != 1 or not kick_args[0].startswith("@"):
+        await update.message.reply_text("Use /kick @usuário.")
+        return
+
+    session = active_sessions.get(chat_id)
+    if session is None:
+        await update.message.reply_text("Não há mesa ativa neste chat.")
+        return
+
+    target_id, target_user = await find_session_player_by_username(
+        chat_id,
+        session,
+        kick_args[0],
+        context,
+    )
+
+    if target_id is None:
+        await update.message.reply_text("Não encontrei esse @ na mesa.")
+        return
+
+    session.players.pop(target_id, None)
+    session.scores.pop(target_id, None)
+    session.votes_continue.discard(target_id)
+    session.votes_end.discard(target_id)
+
+    await update.message.reply_text(
+        f"{mention_user(target_user)} foi expulso da mesa por @dirthands.",
+        parse_mode="HTML",
+    )
+
+    if session.started and len(session.players) < session.min_players:
+        del active_sessions[chat_id]
+        await update.message.reply_text("A partida foi encerrada porque restaram menos de 2 jogadores.")
+
 async def bot_chat_member_update(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat = update.my_chat_member.chat
     new_status = update.my_chat_member.new_chat_member.status
@@ -796,16 +865,16 @@ async def ask_loan_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
         if amount < MIN_LOAN_COINS or amount > MAX_LOAN_COINS:
-            await update.message.reply_text("Kaz só empresta valores entre 3 e 12 moedas.")
+            await update.message.reply_text("Mãos Sujas só empresta valores entre 3 e 12 moedas.")
             return
 
         loan = lend_from_dealer(chat_id, user_id, amount)
         if loan <= 0:
-            await update.message.reply_text("Kaz não tem moedas suficientes neste grupo para emprestar agora.")
+            await update.message.reply_text("Mãos Sujas não tem moedas suficientes para emprestar agora.")
             return
 
         await update.message.reply_text(
-            f"Kaz Brekker emprestou {loan} moeda(s).\n"
+            f"Mãos Sujas emprestou {loan} moeda(s).\n"
             f"Sua dívida com o Mãos Sujas: {get_player_debt(user_id)} moeda(s)."
         )
         if has_vanishing_money_curse(user_id):
@@ -824,22 +893,22 @@ async def loan_amount_message(update: Update, context: ContextTypes.DEFAULT_TYPE
     try:
         amount = int(text)
     except ValueError:
-        await update.message.reply_text("Kaz esperava um número. Use /pedir de novo e escolha um valor de 3 a 12.")
+        await update.message.reply_text("Mãos Sujas esperava um número. Use /pedir de novo e escolha um valor de 3 a 12.")
         return
 
     if amount < MIN_LOAN_COINS or amount > MAX_LOAN_COINS:
-        await update.message.reply_text("Kaz só empresta valores entre 3 e 12 moedas. Use /pedir de novo.")
+        await update.message.reply_text("Mãos Sujas só empresta valores entre 3 e 12 moedas. Use /pedir de novo.")
         return
 
     user_id = update.message.from_user.id
     chat_id = get_loan_chat_id(update.message.chat_id, user_id)
     loan = lend_from_dealer(chat_id, user_id, amount)
     if loan <= 0:
-        await update.message.reply_text("Kaz não tem moedas suficientes neste grupo para emprestar agora.")
+        await update.message.reply_text("Mãos Sujas não tem moedas suficientes para emprestar agora.")
         return
 
     await update.message.reply_text(
-        f"Kaz Brekker emprestou {loan} moeda(s).\n"
+        f"Mãos Sujas emprestou {loan} moeda(s).\n"
         f"Sua dívida com o Mãos Sujas: {get_player_debt(user_id)} moeda(s)."
     )
     if has_vanishing_money_curse(user_id):
@@ -856,7 +925,7 @@ async def pay_debt_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if balance <= 0:
-        await update.message.reply_text("Você não tem moedas para pagar Kaz agora.")
+        await update.message.reply_text("Você não tem moedas para pagar o Mãos Sujas agora.")
         return
 
     if context.args:
@@ -1187,19 +1256,21 @@ async def hit_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if total == 21:
         private_message += "Blackjack! 21 pontos!"
         player["stand"] = True
+        await safe_send_message(context, chat_id, f"{user.first_name} pegou uma carta.")
         await safe_send_message(context, user_id, private_message)
+        await asyncio.sleep(2)
         await safe_send_message(context, chat_id, f"{user.first_name} finalizou a rodada.")
         await check_round_end(chat_id, session, context)
     elif total > 21:
         if any(card.value == "Joker" for card in player["hand"]):
             all_curses = session.game._create_deck()
-            curse_card = choose_curse_card(all_curses, player)
+            curse_card = choose_curse_card(all_curses, player, session)
         else:
-            curse_card = choose_curse_card(player["hand"], player)
+            curse_card = choose_curse_card(player["hand"], player, session)
             if curse_card is None:
-                curse_card = choose_curse_card(session.game._create_deck(), player)
+                curse_card = choose_curse_card(session.game._create_deck(), player, session)
 
-        apply_curse_to_player(player, curse_card)
+        apply_curse_to_player(player, curse_card, session)
         money_curse_message = await apply_immediate_curse_effects(
             chat_id,
             session,
@@ -1218,14 +1289,16 @@ async def hit_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         if money_curse_message:
             private_message += f"\n\nMoedas: {money_curse_message}"
+        await safe_send_message(context, chat_id, f"{user.first_name} pegou uma carta.")
         await safe_send_message(context, user_id, private_message)
         player["stand"] = True
+        await asyncio.sleep(2)
         await safe_send_message(context, chat_id, f"{user.first_name} finalizou a rodada.")
         await check_round_end(chat_id, session, context)
     else:
         private_message += "Use /hit para mais uma carta ou /stand para manter"
         await safe_send_message(context, user_id, private_message)
-        await safe_send_message(context, chat_id, f"{user.first_name} pediu uma carta!")
+        await safe_send_message(context, chat_id, f"{user.first_name} pegou uma carta.")
 
 async def stand_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
@@ -1382,15 +1455,37 @@ async def end_game(chat_id, session, context):
                     f"Saldo atual: {get_player_balance(loser_id)} moeda(s)."
                 )
     else:
+        losers = [player_id for player_id in session.players.keys() if player_id not in final_winners]
         winners_names = [
             mention_user((await context.bot.get_chat_member(chat_id, winner_id)).user)
             for winner_id in final_winners
         ]
+        transfers, totals_received = transfer_coins_to_winners(final_winners, losers)
         final_message += (
             f"Houve um empate entre: {', '.join(winners_names)}\n"
             f"Cada um com {max_score} pontos!\n"
-            "Como não houve vencedor único, nenhuma moeda foi transferida."
+            "O ouro foi dividido entre os primeiros lugares."
         )
+
+        if totals_received:
+            final_message += "\n\nRecebimentos:"
+            for winner_id in final_winners:
+                winner = await context.bot.get_chat_member(chat_id, winner_id)
+                final_message += (
+                    f"\n- {mention_user(winner.user)} recebeu "
+                    f"{totals_received.get(winner_id, 0)} moeda(s). "
+                    f"Saldo atual: {get_player_balance(winner_id)} moeda(s)."
+                )
+
+        if transfers:
+            final_message += "\n\nTransferências:"
+            for loser_id, winner_amounts in transfers.items():
+                loser = await context.bot.get_chat_member(chat_id, loser_id)
+                paid = sum(winner_amounts.values())
+                final_message += (
+                    f"\n- {mention_user(loser.user)} perdeu {paid} moeda(s). "
+                    f"Saldo atual: {get_player_balance(loser_id)} moeda(s)."
+                )
 
     final_message += "\n\nMaldições finais:"
     cursed_player_ids = last_place_players
@@ -1492,10 +1587,11 @@ async def rules_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "13. Cada jogador começa com 10 moedas persistentes\n"
         "14. Ao fim da partida, cada perdedor transfere até 3 moedas ao vencedor\n"
         "15. Apenas quem ficar sozinho em último lugar sofre as maldições finais\n"
-        "16. Kaz Brekker tem 1000 moedas por grupo e pode cobrar pelas maldições de Ouros\n"
+        "16. Mãos Sujas tem 1004 moedas e é dele que saem os empréstimos de /pedir e entram os pagamentos de /pay\n"
         "17. Se ficar sem moedas, use /pedir para pegar de 3 a 12 moedas emprestadas\n"
         "18. Use /pay para pagar tudo que puder ou /pay 2 para pagar aos poucos\n"
         "19. Use /doar @usuário quantia para doar moedas a outro jogador da mesa\n"
+        "20. Só @dirthands pode usar /kick @usuário para expulsar alguém da mesa\n"
         "Jogue por sua conta e risco..."
     )
 
@@ -1524,6 +1620,7 @@ def main():
     app.add_handler(CommandHandler('doar', donate_command))
     app.add_handler(CommandHandler('pedir', ask_loan_command))
     app.add_handler(CommandHandler('pay', pay_debt_command))
+    app.add_handler(CommandHandler('kick', kick_command))
     app.add_handler(CommandHandler('leave', leave_command))
     app.add_handler(CommandHandler('continue', continue_command))
     app.add_handler(CommandHandler('end', end_command))
